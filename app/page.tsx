@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
-import Image from "next/image";
 
 type OrientationSample = {
   alpha: number | null;
