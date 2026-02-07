@@ -59,6 +59,8 @@ export default function Home() {
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const targetEulerRef = useRef(new THREE.Euler(0, 0, 0, "ZXY"));
   const cubeRef = useRef<THREE.Mesh | null>(null);
+  const targetQuaternionRef = useRef(new THREE.Quaternion());
+  const currentQuaternionRef = useRef(new THREE.Quaternion());
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -164,10 +166,8 @@ export default function Home() {
     const animate = () => {
       raf = requestAnimationFrame(animate);
       if (cubeRef.current) {
-        const target = targetEulerRef.current;
-        cubeRef.current.rotation.x += (target.x - cubeRef.current.rotation.x) * 0.15;
-        cubeRef.current.rotation.y += (target.y - cubeRef.current.rotation.y) * 0.15;
-        cubeRef.current.rotation.z += (target.z - cubeRef.current.rotation.z) * 0.15;
+        currentQuaternionRef.current.slerp(targetQuaternionRef.current, 0.15);
+        cubeRef.current.quaternion.copy(currentQuaternionRef.current);
       }
       renderer.render(scene, camera);
     };
@@ -288,13 +288,15 @@ export default function Home() {
     if (alpha == null || beta == null || gamma == null) return;
 
     const degToRad = THREE.MathUtils.degToRad;
-    // Fix 1: Match the Euler order
-targetEulerRef.current.set(
-  degToRad(beta),
-  degToRad(gamma),
-  degToRad(alpha),
-  "XYZ", // Changed from "ZXY"
-);
+
+    const euler = new THREE.Euler(
+      degToRad(beta),
+      degToRad(alpha),
+      -degToRad(gamma),
+      'YXZ'
+    );
+
+    targetQuaternionRef.current.setFromEuler(euler);
   }, [latest]);
 
   const requestPermission = async () => {
