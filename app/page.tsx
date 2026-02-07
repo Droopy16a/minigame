@@ -293,7 +293,7 @@ export default function Home() {
       degToRad(beta),
       degToRad(alpha),
       -degToRad(gamma),
-      'YXZ'
+      'XYZ'
     );
 
     targetQuaternionRef.current.setFromEuler(euler);
