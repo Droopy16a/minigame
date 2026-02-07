@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
+import * as THREE from "three";
 
 type OrientationSample = {
   alpha: number | null;
@@ -55,6 +56,9 @@ export default function Home() {
 
   const latestRef = useRef<MotionSample | null>(null);
   const sendingRef = useRef(false);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const targetEulerRef = useRef(new THREE.Euler(0, 0, 0, "ZXY"));
+  const cubeRef = useRef<THREE.Mesh | null>(null);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -109,6 +113,76 @@ export default function Home() {
       clearInterval(interval);
     };
   }, [role, session]);
+
+  useEffect(() => {
+    if (role !== "host") return;
+    if (!canvasRef.current) return;
+
+    const mount = canvasRef.current;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color("#0b0b0f");
+
+    const camera = new THREE.PerspectiveCamera(
+      50,
+      mount.clientWidth / mount.clientHeight,
+      0.1,
+      100,
+    );
+    camera.position.set(0, 0, 5);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(mount.clientWidth, mount.clientHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    mount.appendChild(renderer.domElement);
+
+    const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambient);
+    const directional = new THREE.DirectionalLight(0xffffff, 0.7);
+    directional.position.set(2, 3, 4);
+    scene.add(directional);
+
+    const geometry = new THREE.BoxGeometry(1.4, 1.4, 1.4);
+    const material = new THREE.MeshStandardMaterial({
+      color: 0x4ade80,
+      metalness: 0.2,
+      roughness: 0.4,
+    });
+    const cube = new THREE.Mesh(geometry, material);
+    scene.add(cube);
+    cubeRef.current = cube;
+
+    const resize = () => {
+      const width = mount.clientWidth;
+      const height = mount.clientHeight;
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      renderer.setSize(width, height);
+    };
+    window.addEventListener("resize", resize);
+
+    let raf = 0;
+    const animate = () => {
+      raf = requestAnimationFrame(animate);
+      if (cubeRef.current) {
+        const target = targetEulerRef.current;
+        cubeRef.current.rotation.x += (target.x - cubeRef.current.rotation.x) * 0.15;
+        cubeRef.current.rotation.y += (target.y - cubeRef.current.rotation.y) * 0.15;
+        cubeRef.current.rotation.z += (target.z - cubeRef.current.rotation.z) * 0.15;
+      }
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+      geometry.dispose();
+      material.dispose();
+      renderer.dispose();
+      cubeRef.current = null;
+      mount.removeChild(renderer.domElement);
+    };
+  }, [role]);
 
   useEffect(() => {
     if (role !== "phone" || !session) return;
@@ -208,6 +282,20 @@ export default function Home() {
     return Date.now() - latest.t < 1200;
   }, [latest]);
 
+  useEffect(() => {
+    if (!latest?.sample?.orientation) return;
+    const { alpha, beta, gamma } = latest.sample.orientation;
+    if (alpha == null || beta == null || gamma == null) return;
+
+    const degToRad = THREE.MathUtils.degToRad;
+    targetEulerRef.current.set(
+      degToRad(beta),
+      degToRad(gamma),
+      degToRad(alpha),
+      "ZXY",
+    );
+  }, [latest]);
+
   const requestPermission = async () => {
     try {
       let granted = false;
@@ -258,7 +346,7 @@ export default function Home() {
 
             {role === "host" ? (
               <div className="mt-4 flex flex-col gap-4">
-                <div className="flex-wrap items-center gap-4">
+                <div className="flex flex-wrap items-center gap-4">
                   <div className="h-40 w-40 rounded-xl bg-zinc-800 p-2">
                     {qrDataUrl ? (
                       // eslint-disable-next-line @next/next/no-img-element
@@ -290,6 +378,16 @@ export default function Home() {
                       Open phone view
                     </button>
                   </div>
+                </div>
+
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+                    Live Cube
+                  </p>
+                  <div
+                    ref={canvasRef}
+                    className="mt-3 h-56 w-full overflow-hidden rounded-lg border border-zinc-800"
+                  />
                 </div>
 
                 <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
