@@ -288,12 +288,13 @@ export default function Home() {
     if (alpha == null || beta == null || gamma == null) return;
 
     const degToRad = THREE.MathUtils.degToRad;
-    targetEulerRef.current.set(
-      degToRad(beta),
-      degToRad(gamma),
-      degToRad(alpha),
-      "ZXY",
-    );
+    // Fix 1: Match the Euler order
+targetEulerRef.current.set(
+  degToRad(beta),
+  degToRad(gamma),
+  degToRad(alpha),
+  "XYZ", // Changed from "ZXY"
+);
   }, [latest]);
 
   const requestPermission = async () => {
