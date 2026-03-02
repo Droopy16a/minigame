@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import * as THREE from "three";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 type OrientationSample = {
   alpha: number | null;
@@ -121,12 +120,6 @@ type AvatarVisual = {
   swingPivot: THREE.Object3D;
   bodyMaterial: THREE.MeshStandardMaterial;
   racketMaterial: THREE.MeshStandardMaterial;
-};
-
-type PovRacketVisual = {
-  group: THREE.Group;
-  pivot: THREE.Object3D;
-  accentMaterials: THREE.MeshStandardMaterial[];
 };
 
 const COURT_HALF_WIDTH = 4.1;
@@ -548,56 +541,6 @@ function createAvatarVisual(side: ScoreOwner): AvatarVisual {
     swingPivot,
     bodyMaterial,
     racketMaterial,
-  };
-}
-
-function createPovRacketVisual(): PovRacketVisual {
-  const group = new THREE.Group();
-  const pivot = new THREE.Object3D();
-  pivot.position.set(0.36, -0.22, -0.88);
-
-  const gripMaterial = new THREE.MeshStandardMaterial({
-    color: 0xe2e8f0,
-    roughness: 0.34,
-    metalness: 0.22,
-  });
-  const frameMaterial = new THREE.MeshStandardMaterial({
-    color: 0x93c5fd,
-    roughness: 0.26,
-    metalness: 0.18,
-  });
-  const stringMaterial = new THREE.MeshStandardMaterial({
-    color: 0xdbeafe,
-    roughness: 0.55,
-    metalness: 0.05,
-  });
-
-  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.033, 0.56, 12), gripMaterial);
-  handle.rotation.z = -0.76;
-  handle.position.set(-0.02, -0.16, 0.02);
-  pivot.add(handle);
-
-  const throat = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.22, 10), frameMaterial);
-  throat.rotation.z = -0.76;
-  throat.position.set(0.1, -0.26, -0.02);
-  pivot.add(throat);
-
-  const frame = new THREE.Mesh(new THREE.TorusGeometry(0.24, 0.03, 14, 32), frameMaterial);
-  frame.rotation.x = Math.PI / 2;
-  frame.position.set(0.22, -0.42, -0.08);
-  pivot.add(frame);
-
-  const strings = new THREE.Mesh(new THREE.RingGeometry(0.03, 0.205, 24), stringMaterial);
-  strings.rotation.x = Math.PI / 2;
-  strings.position.set(0.22, -0.42, -0.08);
-  pivot.add(strings);
-
-  group.add(pivot);
-
-  return {
-    group,
-    pivot,
-    accentMaterials: [frameMaterial],
   };
 }
 
@@ -1065,63 +1008,6 @@ export default function Home() {
     });
     scene.add(cpuVisual.group);
 
-    const povRacket = createPovRacketVisual();
-    camera.add(povRacket.group);
-    let disposed = false;
-
-    const loader = new GLTFLoader();
-    loader.load(
-      "/racket.gltf",
-      (gltf) => {
-        if (disposed) return;
-
-        const modelRoot = gltf.scene;
-        modelRoot.traverse((obj) => {
-          if (obj instanceof THREE.Mesh) {
-            obj.castShadow = true;
-            obj.receiveShadow = true;
-
-            if (Array.isArray(obj.material)) {
-              for (const mat of obj.material) {
-                if (
-                  mat instanceof THREE.MeshStandardMaterial &&
-                  !povRacket.accentMaterials.includes(mat)
-                ) {
-                  povRacket.accentMaterials.push(mat);
-                }
-              }
-            } else if (
-              obj.material instanceof THREE.MeshStandardMaterial &&
-              !povRacket.accentMaterials.includes(obj.material)
-            ) {
-              povRacket.accentMaterials.push(obj.material);
-            }
-          }
-        });
-
-        const box = new THREE.Box3().setFromObject(modelRoot);
-        const center = box.getCenter(new THREE.Vector3());
-        const size = box.getSize(new THREE.Vector3());
-        const maxDim = Math.max(size.x, size.y, size.z, 1e-4);
-        const scale = 0.75 / maxDim;
-
-        modelRoot.scale.setScalar(scale);
-        modelRoot.position.sub(center.multiplyScalar(scale));
-        modelRoot.rotation.set(Math.PI / 2, Math.PI, 0);
-        modelRoot.position.set(0.21, -0.41, -0.08);
-
-        for (const child of povRacket.pivot.children) {
-          child.visible = false;
-        }
-        povRacket.pivot.add(modelRoot);
-      },
-      undefined,
-      () => {
-        // Keep fallback racket if model is missing/incomplete (e.g. missing scene.bin).
-        console.warn("Could not load /racket.gltf. Using fallback racket mesh.");
-      },
-    );
-
     const resize = () => {
       const w = mount.clientWidth;
       const h = Math.max(1, mount.clientHeight);
@@ -1443,24 +1329,6 @@ export default function Home() {
       const lookZ = THREE.MathUtils.lerp(-2.8, sim.ballPos.z, 0.88);
       camera.lookAt(lookX, lookY, lookZ);
 
-      povRacket.pivot.rotation.set(
-        -0.26 + control.racketPitch,
-        0.08 + control.racketYaw * 0.85,
-        -0.86 - control.racketRoll,
-      );
-
-      if (sim.player.flash > 0) {
-        for (const mat of povRacket.accentMaterials) {
-          mat.emissive.setHex(0xfef08a);
-          mat.emissiveIntensity = 0.52;
-        }
-      } else {
-        for (const mat of povRacket.accentMaterials) {
-          mat.emissive.setHex(0x000000);
-          mat.emissiveIntensity = 0;
-        }
-      }
-
       renderer.render(scene, camera);
 
       if (now - lastHudCommit > 110) {
@@ -1476,7 +1344,6 @@ export default function Home() {
     raf = window.requestAnimationFrame(animate);
 
     return () => {
-      disposed = true;
       window.removeEventListener("resize", resize);
       window.cancelAnimationFrame(raf);
 
@@ -1638,7 +1505,7 @@ export default function Home() {
           <p className="text-xs uppercase tracking-[0.28em] text-cyan-300/70">Pocket Racket</p>
           <h1 className="text-3xl font-semibold">3D Wii-Style Phone Tennis</h1>
           <p className="text-sm text-slate-300/85">
-            First-person court view with a racket that mirrors your phone orientation in real time.
+            First-person court view with phone-driven Wii-style tennis controls.
           </p>
         </header>
 
@@ -1878,7 +1745,7 @@ export default function Home() {
               <li>Roll and lift your wrist through contact to shape direction and spin.</li>
             </ol>
             <p className="mt-4 text-xs text-slate-500">
-              POV camera is active during play, with direct phone-to-racket orientation mapping.
+              POV camera is active during play.
             </p>
           </section>
         </div>
