@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 type OrientationSample = {
   alpha: number | null;
@@ -125,7 +126,7 @@ type AvatarVisual = {
 type PovRacketVisual = {
   group: THREE.Group;
   pivot: THREE.Object3D;
-  frameMaterial: THREE.MeshStandardMaterial;
+  accentMaterials: THREE.MeshStandardMaterial[];
 };
 
 const COURT_HALF_WIDTH = 4.1;
@@ -596,7 +597,7 @@ function createPovRacketVisual(): PovRacketVisual {
   return {
     group,
     pivot,
-    frameMaterial,
+    accentMaterials: [frameMaterial],
   };
 }
 
@@ -1066,6 +1067,60 @@ export default function Home() {
 
     const povRacket = createPovRacketVisual();
     camera.add(povRacket.group);
+    let disposed = false;
+
+    const loader = new GLTFLoader();
+    loader.load(
+      "/racket.gltf",
+      (gltf) => {
+        if (disposed) return;
+
+        const modelRoot = gltf.scene;
+        modelRoot.traverse((obj) => {
+          if (obj instanceof THREE.Mesh) {
+            obj.castShadow = true;
+            obj.receiveShadow = true;
+
+            if (Array.isArray(obj.material)) {
+              for (const mat of obj.material) {
+                if (
+                  mat instanceof THREE.MeshStandardMaterial &&
+                  !povRacket.accentMaterials.includes(mat)
+                ) {
+                  povRacket.accentMaterials.push(mat);
+                }
+              }
+            } else if (
+              obj.material instanceof THREE.MeshStandardMaterial &&
+              !povRacket.accentMaterials.includes(obj.material)
+            ) {
+              povRacket.accentMaterials.push(obj.material);
+            }
+          }
+        });
+
+        const box = new THREE.Box3().setFromObject(modelRoot);
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z, 1e-4);
+        const scale = 0.75 / maxDim;
+
+        modelRoot.scale.setScalar(scale);
+        modelRoot.position.sub(center.multiplyScalar(scale));
+        modelRoot.rotation.set(Math.PI / 2, Math.PI, 0);
+        modelRoot.position.set(0.21, -0.41, -0.08);
+
+        for (const child of povRacket.pivot.children) {
+          child.visible = false;
+        }
+        povRacket.pivot.add(modelRoot);
+      },
+      undefined,
+      () => {
+        // Keep fallback racket if model is missing/incomplete (e.g. missing scene.bin).
+        console.warn("Could not load /racket.gltf. Using fallback racket mesh.");
+      },
+    );
 
     const resize = () => {
       const w = mount.clientWidth;
@@ -1395,11 +1450,15 @@ export default function Home() {
       );
 
       if (sim.player.flash > 0) {
-        povRacket.frameMaterial.emissive.setHex(0xfef08a);
-        povRacket.frameMaterial.emissiveIntensity = 0.52;
+        for (const mat of povRacket.accentMaterials) {
+          mat.emissive.setHex(0xfef08a);
+          mat.emissiveIntensity = 0.52;
+        }
       } else {
-        povRacket.frameMaterial.emissive.setHex(0x000000);
-        povRacket.frameMaterial.emissiveIntensity = 0;
+        for (const mat of povRacket.accentMaterials) {
+          mat.emissive.setHex(0x000000);
+          mat.emissiveIntensity = 0;
+        }
       }
 
       renderer.render(scene, camera);
@@ -1417,6 +1476,7 @@ export default function Home() {
     raf = window.requestAnimationFrame(animate);
 
     return () => {
+      disposed = true;
       window.removeEventListener("resize", resize);
       window.cancelAnimationFrame(raf);
 
