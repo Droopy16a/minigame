@@ -6,15 +6,23 @@ type StoreEntry = {
   sample: unknown;
 };
 
-declare global {
-  // eslint-disable-next-line no-var
-  var __motionStore: Map<string, StoreEntry> | undefined;
-}
+const SESSION_TTL_MS = 15 * 60 * 1000;
+
+const globalStore = globalThis as typeof globalThis & {
+  __motionStore?: Map<string, StoreEntry>;
+};
 
 const store: Map<string, StoreEntry> =
-  globalThis.__motionStore ?? new Map<string, StoreEntry>();
+  globalStore.__motionStore ?? new Map<string, StoreEntry>();
+globalStore.__motionStore = store;
 
-globalThis.__motionStore = store;
+function pruneStore(now: number) {
+  for (const [session, entry] of store.entries()) {
+    if (now - entry.t > SESSION_TTL_MS) {
+      store.delete(session);
+    }
+  }
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,9 +38,12 @@ export async function POST(request: Request) {
       );
     }
 
+    const now = Date.now();
+    pruneStore(now);
+
     const prev = store.get(session);
     const entry: StoreEntry = {
-      t: Date.now(),
+      t: now,
       seq: (prev?.seq ?? 0) + 1,
       sample: body?.sample ?? null,
     };
@@ -57,6 +68,10 @@ export async function GET(request: Request) {
     );
   }
 
+  pruneStore(Date.now());
   const entry = store.get(session) ?? null;
-  return NextResponse.json({ ok: true, entry });
+  return NextResponse.json(
+    { ok: true, entry },
+    { headers: { "Cache-Control": "no-store, max-age=0" } },
+  );
 }
