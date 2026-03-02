@@ -116,7 +116,7 @@ const NET_Z = 0;
 const NET_HEIGHT = 1.0;
 
 const BALL_RADIUS = 0.14;
-const GRAVITY = 12.2;
+const GRAVITY = 9.8;
 const GROUND_BOUNCE = 0.72;
 const AIR_DRAG = 0.014;
 
@@ -296,18 +296,21 @@ function strikeBall(
   pitch: number,
   isServe: boolean,
 ) {
-  const forward = (isServe ? 17.5 : 19.4) + power * 8.8;
+  const forward = (isServe ? 10.8 : 12.2) + power * (isServe ? 3.6 : 4.4);
   const toward = hitter === "player" ? -1 : 1;
   const lateral = clamp(
-    roll * 6.7 + (hitter === "cpu" ? (Math.random() - 0.5) * 1.6 : 0),
-    -10.5,
-    10.5,
+    roll * 4.8 + (hitter === "cpu" ? (Math.random() - 0.5) * 1.3 : 0),
+    -7.8,
+    7.8,
   );
-  const lift = (isServe ? 6.1 : 5.4) + power * 2.7 + clamp(-pitch * 1.65, -1.2, 1.7);
+  const lift =
+    (isServe ? 4.2 : 3.6) +
+    power * (isServe ? 1.55 : 1.35) +
+    clamp(-pitch * 1.15, -0.9, 1.2);
 
   sim.ballVel.set(lateral, lift, toward * forward);
-  sim.ballSpinSide = roll * (4.2 + power * 5.5);
-  sim.ballSpinTop = clamp(-pitch * 5.6 + power * 2.2, -8.5, 10.5);
+  sim.ballSpinSide = roll * (2.6 + power * 3.2);
+  sim.ballSpinTop = clamp(-pitch * 3.4 + power * 1.4, -5.2, 6.2);
 
   if (isServe) {
     if (hitter === "player") {
@@ -1044,11 +1047,11 @@ export default function Home() {
           sim.ballVel.y -= GRAVITY * dt;
           sim.ballVel.x *= 1 - AIR_DRAG * dt;
           sim.ballVel.z *= 1 - AIR_DRAG * dt;
-          sim.ballVel.x += sim.ballSpinSide * 0.14 * dt;
-          sim.ballVel.y -= Math.max(sim.ballSpinTop, 0) * 0.2 * dt;
-          sim.ballVel.z += -Math.sign(sim.ballVel.z || 1) * sim.ballSpinTop * 0.05 * dt;
-          sim.ballSpinSide *= 1 - Math.min(0.35 * dt, 0.25);
-          sim.ballSpinTop *= 1 - Math.min(0.4 * dt, 0.28);
+          sim.ballVel.x += sim.ballSpinSide * 0.11 * dt;
+          sim.ballVel.y -= Math.max(sim.ballSpinTop, 0) * 0.13 * dt;
+          sim.ballVel.z += -Math.sign(sim.ballVel.z || 1) * sim.ballSpinTop * 0.028 * dt;
+          sim.ballSpinSide *= 1 - Math.min(0.42 * dt, 0.25);
+          sim.ballSpinTop *= 1 - Math.min(0.52 * dt, 0.28);
           sim.ballPos.addScaledVector(sim.ballVel, dt);
 
           if (
@@ -1124,20 +1127,21 @@ export default function Home() {
               if (match.serveInFlight) {
                 match.serveInFlight = false;
               }
-              sim.ballVel.y = Math.max(Math.abs(sim.ballVel.y) * GROUND_BOUNCE, 3.8);
-              sim.ballVel.x = sim.ballVel.x * 0.9 + sim.ballSpinSide * 0.25;
-              sim.ballVel.z = sim.ballVel.z * 0.94 - Math.sign(sim.ballVel.z || 1) * sim.ballSpinTop * 0.14;
-              sim.ballSpinSide *= 0.58;
-              sim.ballSpinTop *= 0.42;
+              sim.ballVel.y = Math.max(Math.abs(sim.ballVel.y) * GROUND_BOUNCE, 2.6);
+              sim.ballVel.x = sim.ballVel.x * 0.88 + sim.ballSpinSide * 0.18;
+              sim.ballVel.z = sim.ballVel.z * 0.91 - Math.sign(sim.ballVel.z || 1) * sim.ballSpinTop * 0.08;
+              sim.ballSpinSide *= 0.52;
+              sim.ballSpinTop *= 0.36;
             }
           }
 
           if (
             !pointEnded &&
             match.lastHitter &&
-            (Math.abs(sim.ballPos.x) > COURT_HALF_WIDTH + 2 ||
-              sim.ballPos.z < -COURT_HALF_LENGTH - 4 ||
-              sim.ballPos.z > COURT_HALF_LENGTH + 4)
+            (Math.abs(sim.ballPos.x) > COURT_HALF_WIDTH + 0.9 ||
+              sim.ballPos.z < -COURT_HALF_LENGTH - 1.6 ||
+              sim.ballPos.z > COURT_HALF_LENGTH + 1.6 ||
+              sim.ballPos.y > 12.5)
           ) {
             awardPoint(opponent(match.lastHitter), "Ball sailed long");
             pointEnded = true;
