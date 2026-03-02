@@ -53,6 +53,7 @@ type SwingAxis = "alpha" | "beta" | "gamma";
 type ControlState = {
   roll: number;
   pitch: number;
+  yaw: number;
   swingMeter: number;
   pendingSwing: SwingPacket | null;
   lastSwingAt: number;
@@ -60,6 +61,10 @@ type ControlState = {
   neutralReady: boolean;
   neutralRoll: number;
   neutralPitch: number;
+  neutralYaw: number;
+  racketRoll: number;
+  racketPitch: number;
+  racketYaw: number;
   lastAccelMag: number;
   swingPrimed: boolean;
   swingPrimeAxis: SwingAxis | null;
@@ -117,6 +122,12 @@ type AvatarVisual = {
   racketMaterial: THREE.MeshStandardMaterial;
 };
 
+type PovRacketVisual = {
+  group: THREE.Group;
+  pivot: THREE.Object3D;
+  frameMaterial: THREE.MeshStandardMaterial;
+};
+
 const COURT_HALF_WIDTH = 4.1;
 const COURT_HALF_LENGTH = 11.9;
 const BASELINE_PLAYER_Z = 9.6;
@@ -145,6 +156,7 @@ const SWING_RELEASE_RATE = 128;
 const SWING_PRIME_TIMEOUT_MS = 850;
 const ROLL_RANGE_DEG = 34;
 const PITCH_RANGE_DEG = 46;
+const YAW_RANGE_DEG = 60;
 const ORIENTATION_SMOOTHING = 0.34;
 
 const CONNECTION_TIMEOUT_MS = 1200;
@@ -173,12 +185,24 @@ function blankSample(): MotionSample {
 
 function getRawRoll(sample: MotionSample | null): number | null {
   const gamma = sample?.orientation?.gamma;
-  return typeof gamma === "number" ? gamma : null;
+  return typeof gamma === "number" && Number.isFinite(gamma) ? gamma : null;
 }
 
 function getRawPitch(sample: MotionSample | null): number | null {
   const beta = sample?.orientation?.beta;
-  return typeof beta === "number" ? beta : null;
+  return typeof beta === "number" && Number.isFinite(beta) ? beta : null;
+}
+
+function getRawYaw(sample: MotionSample | null): number | null {
+  const alpha = sample?.orientation?.alpha;
+  return typeof alpha === "number" && Number.isFinite(alpha) ? alpha : null;
+}
+
+function shortestAngleDelta(fromDeg: number, toDeg: number) {
+  let delta = fromDeg - toDeg;
+  while (delta > 180) delta -= 360;
+  while (delta < -180) delta += 360;
+  return delta;
 }
 
 function analyzeSwing(sample: MotionSample | null, previousAccelMagnitude = 9.8): {
@@ -231,6 +255,7 @@ function analyzeSwing(sample: MotionSample | null, previousAccelMagnitude = 9.8)
 function updateControlFromSample(control: ControlState, sample: MotionSample | null, sampleTime: number) {
   const rawRoll = getRawRoll(sample);
   const rawPitch = getRawPitch(sample);
+  const rawYaw = getRawYaw(sample);
 
   if (
     rawRoll !== null &&
@@ -244,13 +269,21 @@ function updateControlFromSample(control: ControlState, sample: MotionSample | n
     control.neutralReady = true;
     control.neutralRoll = rawRoll;
     control.neutralPitch = rawPitch;
+    control.neutralYaw = rawYaw ?? 0;
   }
 
   if (control.neutralReady && rawRoll !== null && rawPitch !== null) {
     const normalizedRoll = clamp((rawRoll - control.neutralRoll) / ROLL_RANGE_DEG, -1, 1);
     const normalizedPitch = clamp((rawPitch - control.neutralPitch) / PITCH_RANGE_DEG, -1, 1);
+    const rawYawDelta = rawYaw == null ? 0 : shortestAngleDelta(rawYaw, control.neutralYaw);
+    const normalizedYaw = clamp(rawYawDelta / YAW_RANGE_DEG, -1, 1);
     control.roll = THREE.MathUtils.lerp(control.roll, normalizedRoll, ORIENTATION_SMOOTHING);
     control.pitch = THREE.MathUtils.lerp(control.pitch, normalizedPitch, ORIENTATION_SMOOTHING);
+    control.yaw = THREE.MathUtils.lerp(control.yaw, normalizedYaw, ORIENTATION_SMOOTHING);
+
+    control.racketRoll = THREE.MathUtils.degToRad(clamp(rawRoll - control.neutralRoll, -120, 120));
+    control.racketPitch = THREE.MathUtils.degToRad(clamp(rawPitch - control.neutralPitch, -130, 130));
+    control.racketYaw = THREE.MathUtils.degToRad(clamp(rawYawDelta, -140, 140));
   }
 
   const swing = analyzeSwing(sample, control.lastAccelMag);
@@ -517,6 +550,56 @@ function createAvatarVisual(side: ScoreOwner): AvatarVisual {
   };
 }
 
+function createPovRacketVisual(): PovRacketVisual {
+  const group = new THREE.Group();
+  const pivot = new THREE.Object3D();
+  pivot.position.set(0.36, -0.22, -0.88);
+
+  const gripMaterial = new THREE.MeshStandardMaterial({
+    color: 0xe2e8f0,
+    roughness: 0.34,
+    metalness: 0.22,
+  });
+  const frameMaterial = new THREE.MeshStandardMaterial({
+    color: 0x93c5fd,
+    roughness: 0.26,
+    metalness: 0.18,
+  });
+  const stringMaterial = new THREE.MeshStandardMaterial({
+    color: 0xdbeafe,
+    roughness: 0.55,
+    metalness: 0.05,
+  });
+
+  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.033, 0.56, 12), gripMaterial);
+  handle.rotation.z = -0.76;
+  handle.position.set(-0.02, -0.16, 0.02);
+  pivot.add(handle);
+
+  const throat = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.22, 10), frameMaterial);
+  throat.rotation.z = -0.76;
+  throat.position.set(0.1, -0.26, -0.02);
+  pivot.add(throat);
+
+  const frame = new THREE.Mesh(new THREE.TorusGeometry(0.24, 0.03, 14, 32), frameMaterial);
+  frame.rotation.x = Math.PI / 2;
+  frame.position.set(0.22, -0.42, -0.08);
+  pivot.add(frame);
+
+  const strings = new THREE.Mesh(new THREE.RingGeometry(0.03, 0.205, 24), stringMaterial);
+  strings.rotation.x = Math.PI / 2;
+  strings.position.set(0.22, -0.42, -0.08);
+  pivot.add(strings);
+
+  group.add(pivot);
+
+  return {
+    group,
+    pivot,
+    frameMaterial,
+  };
+}
+
 export default function Home() {
   const [role, setRole] = useState<"host" | "phone">("host");
   const [session, setSession] = useState("");
@@ -549,6 +632,7 @@ export default function Home() {
   const controlRef = useRef<ControlState>({
     roll: 0,
     pitch: 0,
+    yaw: 0,
     swingMeter: 0,
     pendingSwing: null,
     lastSwingAt: 0,
@@ -556,6 +640,10 @@ export default function Home() {
     neutralReady: false,
     neutralRoll: 0,
     neutralPitch: 0,
+    neutralYaw: 0,
+    racketRoll: 0,
+    racketPitch: 0,
+    racketYaw: 0,
     lastAccelMag: 9.8,
     swingPrimed: false,
     swingPrimeAxis: null,
@@ -800,6 +888,7 @@ export default function Home() {
     controlRef.current = {
       roll: 0,
       pitch: 0,
+      yaw: 0,
       swingMeter: 0,
       pendingSwing: null,
       lastSwingAt: 0,
@@ -807,6 +896,10 @@ export default function Home() {
       neutralReady: false,
       neutralRoll: 0,
       neutralPitch: 0,
+      neutralYaw: 0,
+      racketRoll: 0,
+      racketPitch: 0,
+      racketYaw: 0,
       lastAccelMag: 9.8,
       swingPrimed: false,
       swingPrimeAxis: null,
@@ -839,13 +932,14 @@ export default function Home() {
     scene.fog = new THREE.Fog(0x0c2138, 28, 58);
 
     const camera = new THREE.PerspectiveCamera(
-      48,
+      69,
       mount.clientWidth / Math.max(1, mount.clientHeight),
       0.1,
       120,
     );
-    camera.position.set(0, 9.6, 22.2);
-    camera.lookAt(0, 1.35, -1.3);
+    camera.position.set(0, 1.66, BASELINE_PLAYER_Z + 0.72);
+    camera.lookAt(0, 1.1, -2.8);
+    scene.add(camera);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -959,6 +1053,7 @@ export default function Home() {
       }
     });
     scene.add(playerVisual.group);
+    playerVisual.group.visible = false;
 
     const cpuVisual = createAvatarVisual("cpu");
     cpuVisual.group.position.set(0, 0, BASELINE_CPU_Z);
@@ -968,6 +1063,9 @@ export default function Home() {
       }
     });
     scene.add(cpuVisual.group);
+
+    const povRacket = createPovRacketVisual();
+    camera.add(povRacket.group);
 
     const resize = () => {
       const w = mount.clientWidth;
@@ -1281,8 +1379,28 @@ export default function Home() {
       const shadowScale = clamp(1.8 - sim.ballPos.y * 0.22, 0.55, 1.6);
       ballShadow.scale.set(shadowScale, shadowScale, shadowScale);
 
-      camera.position.x = THREE.MathUtils.lerp(camera.position.x, sim.ballPos.x * 0.14, 0.05);
-      camera.lookAt(sim.ballPos.x * 0.08, 1.2, -1.6);
+      camera.position.x = THREE.MathUtils.lerp(camera.position.x, sim.player.x * 0.98, 0.22);
+      camera.position.y = THREE.MathUtils.lerp(camera.position.y, 1.66, 0.22);
+      camera.position.z = THREE.MathUtils.lerp(camera.position.z, BASELINE_PLAYER_Z + 0.72, 0.22);
+
+      const lookX = THREE.MathUtils.lerp(sim.player.x * 0.2, sim.ballPos.x, 0.72);
+      const lookY = clamp(sim.ballPos.y * 0.72 + 0.86, 0.95, 3.9);
+      const lookZ = THREE.MathUtils.lerp(-2.8, sim.ballPos.z, 0.88);
+      camera.lookAt(lookX, lookY, lookZ);
+
+      povRacket.pivot.rotation.set(
+        -0.26 + control.racketPitch,
+        0.08 + control.racketYaw * 0.85,
+        -0.86 - control.racketRoll,
+      );
+
+      if (sim.player.flash > 0) {
+        povRacket.frameMaterial.emissive.setHex(0xfef08a);
+        povRacket.frameMaterial.emissiveIntensity = 0.52;
+      } else {
+        povRacket.frameMaterial.emissive.setHex(0x000000);
+        povRacket.frameMaterial.emissiveIntensity = 0;
+      }
 
       renderer.render(scene, camera);
 
@@ -1363,6 +1481,10 @@ export default function Home() {
     simRef.current = createSimState();
     controlRef.current.pendingSwing = null;
     controlRef.current.swingMeter = 0;
+    controlRef.current.yaw = 0;
+    controlRef.current.racketRoll = 0;
+    controlRef.current.racketPitch = 0;
+    controlRef.current.racketYaw = 0;
     controlRef.current.swingPrimed = false;
     controlRef.current.swingPrimeAxis = null;
     controlRef.current.swingPrimeSign = 0;
@@ -1390,12 +1512,20 @@ export default function Home() {
     const sample = latest?.sample ?? null;
     const roll = getRawRoll(sample);
     const pitch = getRawPitch(sample);
+    const yaw = getRawYaw(sample);
     if (roll !== null && pitch !== null) {
       control.neutralRoll = roll;
       control.neutralPitch = pitch;
+      if (yaw !== null) {
+        control.neutralYaw = yaw;
+      }
       control.neutralReady = true;
       control.roll = 0;
       control.pitch = 0;
+      control.yaw = 0;
+      control.racketRoll = 0;
+      control.racketPitch = 0;
+      control.racketYaw = 0;
       control.swingPrimed = false;
       control.swingPrimeAxis = null;
       control.swingPrimeSign = 0;
@@ -1448,7 +1578,7 @@ export default function Home() {
           <p className="text-xs uppercase tracking-[0.28em] text-cyan-300/70">Pocket Racket</p>
           <h1 className="text-3xl font-semibold">3D Wii-Style Phone Tennis</h1>
           <p className="text-sm text-slate-300/85">
-            Real 3D court, Wii-like swing timing, and phone wrist angle for shot direction.
+            First-person court view with a racket that mirrors your phone orientation in real time.
           </p>
         </header>
 
@@ -1688,7 +1818,7 @@ export default function Home() {
               <li>Roll and lift your wrist through contact to shape direction and spin.</li>
             </ol>
             <p className="mt-4 text-xs text-slate-500">
-              This is now true 3D rendering and physics (Three.js), not a flat 2D paddle board.
+              POV camera is active during play, with direct phone-to-racket orientation mapping.
             </p>
           </section>
         </div>
