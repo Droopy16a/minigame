@@ -60,6 +60,10 @@ type ControlState = {
   roll: number;
   pitch: number;
   yaw: number;
+  unwrappedRoll: number;
+  unwrappedPitch: number;
+  unwrappedYaw: number;
+  angleTrackingReady: boolean;
   deviceQuat: THREE.Quaternion;
   neutralQuat: THREE.Quaternion;
   relativeQuat: THREE.Quaternion;
@@ -78,6 +82,17 @@ const ORIENTATION_SMOOTHING = 0.32;
 
 function clamp(v: number, min: number, max: number) {
   return Math.min(max, Math.max(min, v));
+}
+
+function shortestAngleDeltaRad(from: number, to: number) {
+  let delta = to - from;
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  while (delta < -Math.PI) delta += Math.PI * 2;
+  return delta;
+}
+
+function unwrapAngleRad(previous: number, nextWrapped: number) {
+  return previous + shortestAngleDeltaRad(previous, nextWrapped);
 }
 
 function makeSessionId() {
@@ -177,9 +192,24 @@ function updateControlFromSample(control: ControlState, sample: MotionSample | n
     control.relativeQuat.copy(control.neutralQuat).invert().multiply(control.deviceQuat);
     DEVICE_RELATIVE_EULER.setFromQuaternion(control.relativeQuat, "YXZ");
 
-    const rollDeg = THREE.MathUtils.radToDeg(DEVICE_RELATIVE_EULER.z);
-    const pitchDeg = THREE.MathUtils.radToDeg(DEVICE_RELATIVE_EULER.x);
-    const yawDeg = THREE.MathUtils.radToDeg(DEVICE_RELATIVE_EULER.y);
+    const rawRoll = DEVICE_RELATIVE_EULER.z;
+    const rawPitch = DEVICE_RELATIVE_EULER.x;
+    const rawYaw = DEVICE_RELATIVE_EULER.y;
+
+    if (!control.angleTrackingReady) {
+      control.unwrappedRoll = rawRoll;
+      control.unwrappedPitch = rawPitch;
+      control.unwrappedYaw = rawYaw;
+      control.angleTrackingReady = true;
+    } else {
+      control.unwrappedRoll = unwrapAngleRad(control.unwrappedRoll, rawRoll);
+      control.unwrappedPitch = unwrapAngleRad(control.unwrappedPitch, rawPitch);
+      control.unwrappedYaw = unwrapAngleRad(control.unwrappedYaw, rawYaw);
+    }
+
+    const rollDeg = THREE.MathUtils.radToDeg(control.unwrappedRoll);
+    const pitchDeg = THREE.MathUtils.radToDeg(control.unwrappedPitch);
+    const yawDeg = THREE.MathUtils.radToDeg(control.unwrappedYaw);
     const normalizedRoll = clamp(rollDeg / ROLL_RANGE_DEG, -1, 1);
     const normalizedPitch = clamp(pitchDeg / PITCH_RANGE_DEG, -1, 1);
     const normalizedYaw = clamp(yawDeg / YAW_RANGE_DEG, -1, 1);
@@ -188,9 +218,9 @@ function updateControlFromSample(control: ControlState, sample: MotionSample | n
     control.pitch = THREE.MathUtils.lerp(control.pitch, normalizedPitch, ORIENTATION_SMOOTHING);
     control.yaw = THREE.MathUtils.lerp(control.yaw, normalizedYaw, ORIENTATION_SMOOTHING);
 
-    control.racketRoll = clamp(DEVICE_RELATIVE_EULER.z, -2.1, 2.1);
-    control.racketPitch = clamp(DEVICE_RELATIVE_EULER.x, -2.2, 2.2);
-    control.racketYaw = clamp(DEVICE_RELATIVE_EULER.y, -2.4, 2.4);
+    control.racketRoll = clamp(control.unwrappedRoll, -2.1, 2.1);
+    control.racketPitch = clamp(control.unwrappedPitch, -2.2, 2.2);
+    control.racketYaw = clamp(control.unwrappedYaw, -2.4, 2.4);
   }
 }
 
@@ -233,6 +263,10 @@ export default function RacketTrackerPage() {
     roll: 0,
     pitch: 0,
     yaw: 0,
+    unwrappedRoll: 0,
+    unwrappedPitch: 0,
+    unwrappedYaw: 0,
+    angleTrackingReady: false,
     deviceQuat: new THREE.Quaternion(),
     neutralQuat: new THREE.Quaternion(),
     relativeQuat: new THREE.Quaternion(),
@@ -691,6 +725,10 @@ export default function RacketTrackerPage() {
     control.pitch = 0;
     control.yaw = 0;
     control.relativeQuat.identity();
+    control.unwrappedRoll = 0;
+    control.unwrappedPitch = 0;
+    control.unwrappedYaw = 0;
+    control.angleTrackingReady = false;
     control.racketRoll = 0;
     control.racketPitch = 0;
     control.racketYaw = 0;
