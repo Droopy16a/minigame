@@ -13,6 +13,7 @@ type OrientationSample = {
 
 type MotionSample = {
   orientation: OrientationSample | null;
+  screenOrientation: number | null;
   rotationRate: {
     alpha: number | null;
     beta: number | null;
@@ -54,6 +55,9 @@ type ControlState = {
   roll: number;
   pitch: number;
   yaw: number;
+  deviceQuat: THREE.Quaternion;
+  neutralQuat: THREE.Quaternion;
+  relativeQuat: THREE.Quaternion;
   swingMeter: number;
   pendingSwing: SwingPacket | null;
   lastSwingAt: number;
@@ -180,6 +184,7 @@ function makeSessionId() {
 function blankSample(): MotionSample {
   return {
     orientation: null,
+    screenOrientation: null,
     rotationRate: null,
     acceleration: null,
     accelerationIncludingGravity: null,
@@ -197,16 +202,56 @@ function getRawPitch(sample: MotionSample | null): number | null {
   return typeof beta === "number" && Number.isFinite(beta) ? beta : null;
 }
 
-function getRawYaw(sample: MotionSample | null): number | null {
-  const alpha = sample?.orientation?.alpha;
-  return typeof alpha === "number" && Number.isFinite(alpha) ? alpha : null;
+const DEVICE_ORIENTATION_EULER = new THREE.Euler();
+const DEVICE_RELATIVE_EULER = new THREE.Euler();
+const DEVICE_Q0 = new THREE.Quaternion();
+const DEVICE_Q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+const DEVICE_Z = new THREE.Vector3(0, 0, 1);
+
+function readClientScreenOrientationDeg() {
+  if (typeof window === "undefined") return 0;
+
+  const screenOrientation = window.screen?.orientation?.angle;
+  if (typeof screenOrientation === "number" && Number.isFinite(screenOrientation)) {
+    return screenOrientation;
+  }
+
+  const legacyOrientation = (window as Window & { orientation?: number }).orientation;
+  if (typeof legacyOrientation === "number" && Number.isFinite(legacyOrientation)) {
+    return legacyOrientation;
+  }
+
+  return 0;
 }
 
-function shortestAngleDelta(fromDeg: number, toDeg: number) {
-  let delta = fromDeg - toDeg;
-  while (delta > 180) delta -= 360;
-  while (delta < -180) delta += 360;
-  return delta;
+function computeDeviceQuaternion(sample: MotionSample | null, target: THREE.Quaternion) {
+  if (!sample?.orientation) {
+    return false;
+  }
+
+  const alphaRaw = sample.orientation.alpha;
+  const betaRaw = sample.orientation.beta;
+  const gammaRaw = sample.orientation.gamma;
+
+  const alpha = typeof alphaRaw === "number" && Number.isFinite(alphaRaw) ? alphaRaw : 0;
+  const beta = typeof betaRaw === "number" && Number.isFinite(betaRaw) ? betaRaw : 0;
+  const gamma = typeof gammaRaw === "number" && Number.isFinite(gammaRaw) ? gammaRaw : 0;
+
+  const screenOrientationDeg =
+    typeof sample.screenOrientation === "number" && Number.isFinite(sample.screenOrientation)
+      ? sample.screenOrientation
+      : 0;
+
+  const alphaRad = THREE.MathUtils.degToRad(alpha);
+  const betaRad = THREE.MathUtils.degToRad(beta);
+  const gammaRad = THREE.MathUtils.degToRad(gamma);
+  const orientRad = THREE.MathUtils.degToRad(screenOrientationDeg);
+
+  DEVICE_ORIENTATION_EULER.set(betaRad, alphaRad, -gammaRad, "YXZ");
+  target.setFromEuler(DEVICE_ORIENTATION_EULER);
+  target.multiply(DEVICE_Q1);
+  target.multiply(DEVICE_Q0.setFromAxisAngle(DEVICE_Z, -orientRad));
+  return true;
 }
 
 function analyzeSwing(sample: MotionSample | null, previousAccelMagnitude = 9.8): {
@@ -257,37 +302,31 @@ function analyzeSwing(sample: MotionSample | null, previousAccelMagnitude = 9.8)
 }
 
 function updateControlFromSample(control: ControlState, sample: MotionSample | null, sampleTime: number) {
-  const rawRoll = getRawRoll(sample);
-  const rawPitch = getRawPitch(sample);
-  const rawYaw = getRawYaw(sample);
+  const gotOrientation = computeDeviceQuaternion(sample, control.deviceQuat);
 
-  if (
-    rawRoll !== null &&
-    rawPitch !== null &&
-    (Number.isNaN(rawRoll) || Number.isNaN(rawPitch) || !Number.isFinite(rawRoll) || !Number.isFinite(rawPitch))
-  ) {
-    return;
-  }
-
-  if (!control.neutralReady && rawRoll !== null && rawPitch !== null) {
+  if (!control.neutralReady && gotOrientation) {
     control.neutralReady = true;
-    control.neutralRoll = rawRoll;
-    control.neutralPitch = rawPitch;
-    control.neutralYaw = rawYaw ?? 0;
+    control.neutralQuat.copy(control.deviceQuat);
   }
 
-  if (control.neutralReady && rawRoll !== null && rawPitch !== null) {
-    const normalizedRoll = clamp((rawRoll - control.neutralRoll) / ROLL_RANGE_DEG, -1, 1);
-    const normalizedPitch = clamp((rawPitch - control.neutralPitch) / PITCH_RANGE_DEG, -1, 1);
-    const rawYawDelta = rawYaw == null ? 0 : shortestAngleDelta(rawYaw, control.neutralYaw);
-    const normalizedYaw = clamp(rawYawDelta / YAW_RANGE_DEG, -1, 1);
+  if (control.neutralReady && gotOrientation) {
+    control.relativeQuat.copy(control.neutralQuat).invert().multiply(control.deviceQuat);
+    DEVICE_RELATIVE_EULER.setFromQuaternion(control.relativeQuat, "YXZ");
+
+    const rollDeg = THREE.MathUtils.radToDeg(DEVICE_RELATIVE_EULER.z);
+    const pitchDeg = THREE.MathUtils.radToDeg(DEVICE_RELATIVE_EULER.x);
+    const yawDeg = THREE.MathUtils.radToDeg(DEVICE_RELATIVE_EULER.y);
+    const normalizedRoll = clamp(rollDeg / ROLL_RANGE_DEG, -1, 1);
+    const normalizedPitch = clamp(pitchDeg / PITCH_RANGE_DEG, -1, 1);
+    const normalizedYaw = clamp(yawDeg / YAW_RANGE_DEG, -1, 1);
+
     control.roll = THREE.MathUtils.lerp(control.roll, normalizedRoll, ORIENTATION_SMOOTHING);
     control.pitch = THREE.MathUtils.lerp(control.pitch, normalizedPitch, ORIENTATION_SMOOTHING);
     control.yaw = THREE.MathUtils.lerp(control.yaw, normalizedYaw, ORIENTATION_SMOOTHING);
 
-    control.racketRoll = THREE.MathUtils.degToRad(clamp(rawRoll - control.neutralRoll, -120, 120));
-    control.racketPitch = THREE.MathUtils.degToRad(clamp(rawPitch - control.neutralPitch, -130, 130));
-    control.racketYaw = THREE.MathUtils.degToRad(clamp(rawYawDelta, -140, 140));
+    control.racketRoll = clamp(DEVICE_RELATIVE_EULER.z, -2.1, 2.1);
+    control.racketPitch = clamp(DEVICE_RELATIVE_EULER.x, -2.2, 2.2);
+    control.racketYaw = clamp(DEVICE_RELATIVE_EULER.y, -2.4, 2.4);
   }
 
   const swing = analyzeSwing(sample, control.lastAccelMag);
@@ -599,6 +638,9 @@ export default function Home() {
     roll: 0,
     pitch: 0,
     yaw: 0,
+    deviceQuat: new THREE.Quaternion(),
+    neutralQuat: new THREE.Quaternion(),
+    relativeQuat: new THREE.Quaternion(),
     swingMeter: 0,
     pendingSwing: null,
     lastSwingAt: 0,
@@ -784,6 +826,9 @@ export default function Home() {
     if (role !== "phone" || !session) return;
 
     latestRef.current = blankSample();
+    if (latestRef.current) {
+      latestRef.current.screenOrientation = readClientScreenOrientationDeg();
+    }
     packetsRef.current = 0;
     setPhoneTelemetry({ roll: 0, pitch: 0, swing: 0, packets: 0 });
 
@@ -812,6 +857,7 @@ export default function Home() {
 
     const motionHandler = (event: DeviceMotionEvent) => {
       const sample = latestRef.current ?? blankSample();
+      sample.screenOrientation = readClientScreenOrientationDeg();
       sample.rotationRate = event.rotationRate
         ? {
             alpha: event.rotationRate.alpha ?? null,
@@ -841,6 +887,7 @@ export default function Home() {
 
     const orientationHandler = (event: DeviceOrientationEvent) => {
       const sample = latestRef.current ?? blankSample();
+      sample.screenOrientation = readClientScreenOrientationDeg();
       sample.orientation = {
         alpha: event.alpha ?? null,
         beta: event.beta ?? null,
@@ -852,8 +899,15 @@ export default function Home() {
       publishPreview();
     };
 
+    const screenOrientationHandler = () => {
+      const sample = latestRef.current ?? blankSample();
+      sample.screenOrientation = readClientScreenOrientationDeg();
+      latestRef.current = sample;
+    };
+
     window.addEventListener("devicemotion", motionHandler);
     window.addEventListener("deviceorientation", orientationHandler);
+    window.addEventListener("orientationchange", screenOrientationHandler);
 
     const interval = window.setInterval(async () => {
       if (sendingRef.current || !mounted) return;
@@ -881,6 +935,7 @@ export default function Home() {
       mounted = false;
       window.removeEventListener("devicemotion", motionHandler);
       window.removeEventListener("deviceorientation", orientationHandler);
+      window.removeEventListener("orientationchange", screenOrientationHandler);
       window.clearInterval(interval);
     };
   }, [role, session]);
@@ -893,6 +948,9 @@ export default function Home() {
       roll: 0,
       pitch: 0,
       yaw: 0,
+      deviceQuat: new THREE.Quaternion(),
+      neutralQuat: new THREE.Quaternion(),
+      relativeQuat: new THREE.Quaternion(),
       swingMeter: 0,
       pendingSwing: null,
       lastSwingAt: 0,
@@ -1497,6 +1555,7 @@ export default function Home() {
     control.racketRoll = 0;
     control.racketPitch = 0;
     control.racketYaw = 0;
+    control.relativeQuat.identity();
     control.swingPrimed = false;
     control.swingPrimeAxis = null;
     control.swingPrimeSign = 0;
@@ -1522,19 +1581,13 @@ export default function Home() {
   const recenterController = () => {
     const control = controlRef.current;
     const sample = latest?.sample ?? null;
-    const roll = getRawRoll(sample);
-    const pitch = getRawPitch(sample);
-    const yaw = getRawYaw(sample);
-    if (roll !== null && pitch !== null) {
-      control.neutralRoll = roll;
-      control.neutralPitch = pitch;
-      if (yaw !== null) {
-        control.neutralYaw = yaw;
-      }
+    if (computeDeviceQuaternion(sample, control.deviceQuat)) {
+      control.neutralQuat.copy(control.deviceQuat);
       control.neutralReady = true;
       control.roll = 0;
       control.pitch = 0;
       control.yaw = 0;
+      control.relativeQuat.identity();
       control.racketRoll = 0;
       control.racketPitch = 0;
       control.racketYaw = 0;
