@@ -115,6 +115,16 @@ type PermissionRequestCapable = {
   requestPermission?: () => Promise<"granted" | "denied">;
 };
 
+type WakeLockSentinelLike = {
+  release: () => Promise<void>;
+};
+
+type WakeLockCapableNavigator = Navigator & {
+  wakeLock?: {
+    request: (type: "screen") => Promise<WakeLockSentinelLike>;
+  };
+};
+
 type AvatarVisual = {
   group: THREE.Group;
   swingPivot: THREE.Object3D;
@@ -718,6 +728,44 @@ export default function Home() {
     if (!motionCtor?.requestPermission && !orientationCtor?.requestPermission) {
       setPermission("granted");
     }
+  }, [role]);
+
+  useEffect(() => {
+    if (role !== "phone") return;
+
+    const wakeCapableNav = navigator as WakeLockCapableNavigator;
+    let active = true;
+    let wakeLock: WakeLockSentinelLike | null = null;
+
+    const requestWakeLock = async () => {
+      if (!active || document.visibilityState !== "visible") return;
+      if (!wakeCapableNav.wakeLock?.request) return;
+
+      try {
+        wakeLock = await wakeCapableNav.wakeLock.request("screen");
+      } catch {
+        // Ignore unsupported or blocked wake lock attempts.
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void requestWakeLock();
+      }
+    };
+
+    void requestWakeLock();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      active = false;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (wakeLock) {
+        void wakeLock.release().catch(() => {
+          // Ignore release errors during teardown.
+        });
+      }
+    };
   }, [role]);
 
   useEffect(() => {
