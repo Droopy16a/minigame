@@ -39,6 +39,7 @@ type StoreEntry = {
 
 type PermissionState = "unknown" | "granted" | "denied";
 type ScoreOwner = "player" | "cpu";
+type HostPhase = "calibration" | "game";
 
 type SwingPacket = {
   strength: number;
@@ -446,6 +447,8 @@ export default function Home() {
     status: "Swing your phone to serve",
   });
   const [controlHud, setControlHud] = useState({ roll: 0, pitch: 0, swing: 0 });
+  const [hostPhase, setHostPhase] = useState<HostPhase>("calibration");
+  const [neutralReady, setNeutralReady] = useState(false);
 
   const latestRef = useRef<MotionSample | null>(null);
   const sendingRef = useRef(false);
@@ -545,6 +548,7 @@ export default function Home() {
     control.lastSeq = latest.seq;
 
     updateControlFromSample(control, latest.sample);
+    setNeutralReady(control.neutralReady);
 
     if (control.swingMeter > SWING_TRIGGER && latest.t - control.lastSwingAt > SWING_REARM_MS) {
       control.pendingSwing = {
@@ -705,10 +709,13 @@ export default function Home() {
       status: "Swing your phone to serve",
     });
     setControlHud({ roll: 0, pitch: 0, swing: 0 });
+    setHostPhase("calibration");
+    setNeutralReady(false);
   }, [role]);
 
   useEffect(() => {
     if (role !== "host") return;
+    if (hostPhase !== "game") return;
     if (!renderMountRef.current) return;
 
     const mount = renderMountRef.current;
@@ -1197,7 +1204,7 @@ export default function Home() {
         mount.removeChild(renderer.domElement);
       }
     };
-  }, [role]);
+  }, [role, hostPhase]);
 
   const requestPermission = async () => {
     try {
@@ -1251,6 +1258,12 @@ export default function Home() {
     setControlHud((prev) => ({ ...prev, swing: 0 }));
   };
 
+  const canLaunchFromCalibration =
+    connected &&
+    latest?.sample?.orientation != null &&
+    typeof latest.sample.orientation.beta === "number" &&
+    typeof latest.sample.orientation.gamma === "number";
+
   const recenterController = () => {
     const control = controlRef.current;
     const sample = latest?.sample ?? null;
@@ -1262,8 +1275,43 @@ export default function Home() {
       control.neutralReady = true;
       control.roll = 0;
       control.pitch = 0;
+      setNeutralReady(true);
       setControlHud((prev) => ({ ...prev, roll: 0, pitch: 0 }));
+      return true;
     }
+    return false;
+  };
+
+  const launchGameFromCalibration = () => {
+    const calibrated = recenterController();
+    if (!calibrated) {
+      setGameHud((prev) => ({
+        ...prev,
+        status: "Cannot calibrate yet. Keep the phone steady and send motion first.",
+      }));
+      return;
+    }
+    resetMatch();
+    setHostPhase("game");
+  };
+
+  const backToCalibration = () => {
+    setHostPhase("calibration");
+    controlRef.current.pendingSwing = null;
+    setGameHud((prev) => ({
+      ...prev,
+      status: "Calibrate the remote, then launch the game.",
+    }));
+  };
+
+  const handleManualRecenter = () => {
+    const calibrated = recenterController();
+    setGameHud((prev) => ({
+      ...prev,
+      status: calibrated
+        ? "Remote calibrated. Launch whenever you are ready."
+        : "No sensor sample yet. Keep the phone still for a second and retry.",
+    }));
   };
 
   return (
@@ -1337,65 +1385,126 @@ export default function Home() {
                         Open Phone View
                       </button>
                       <button
-                        onClick={resetMatch}
-                        className="rounded-lg border border-cyan-600/70 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/20"
-                      >
-                        Reset Match
-                      </button>
-                      <button
-                        onClick={recenterController}
+                        onClick={handleManualRecenter}
                         className="rounded-lg border border-slate-600 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800"
                       >
                         Recenter Motion
                       </button>
+                      {hostPhase === "calibration" ? (
+                        <button
+                          onClick={launchGameFromCalibration}
+                          disabled={!canLaunchFromCalibration}
+                          className="rounded-lg border border-cyan-600/70 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200 enabled:hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Calibrate & Launch
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            onClick={resetMatch}
+                            className="rounded-lg border border-cyan-600/70 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                          >
+                            Reset Match
+                          </button>
+                          <button
+                            onClick={backToCalibration}
+                            className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800"
+                          >
+                            Back to Calibration
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
 
-                <div
-                  ref={renderMountRef}
-                  className="aspect-[16/9] w-full overflow-hidden rounded-xl border border-slate-800 bg-slate-950"
-                />
+                {hostPhase === "calibration" ? (
+                  <>
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Connection</p>
+                        <p className="mt-2 text-sm text-slate-200">
+                          {connected ? "Phone telemetry streaming" : "Waiting for live packets"}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-400">
+                          Launch unlocks once orientation data is received.
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Neutral Pose</p>
+                        <p className="mt-2 text-sm text-slate-200">
+                          {neutralReady ? "Calibrated" : "Not calibrated"}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-400">
+                          Hold phone flat like a Wii Remote, then recenter.
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Live Motion</p>
+                        <p className="mt-2 text-sm text-slate-200">
+                          Roll {controlHud.roll.toFixed(2)} | Pitch {controlHud.pitch.toFixed(2)}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-400">Swing {controlHud.swing.toFixed(2)}</p>
+                      </div>
+                    </div>
 
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                    <p className="text-xs uppercase tracking-[0.2em] text-slate-500">You</p>
-                    <p className="mt-1 text-2xl font-semibold text-emerald-300">{gameHud.player}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                    <p className="text-xs uppercase tracking-[0.2em] text-slate-500">CPU</p>
-                    <p className="mt-1 text-2xl font-semibold text-orange-300">{gameHud.cpu}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                    <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Rally</p>
-                    <p className="mt-1 text-2xl font-semibold text-slate-100">{gameHud.rally}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                    <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Controller</p>
-                    <p className="mt-1 text-sm text-slate-200">
-                      Roll {controlHud.roll.toFixed(2)} | Pitch {controlHud.pitch.toFixed(2)}
-                    </p>
-                    <p className="text-xs text-slate-400">Swing {controlHud.swing.toFixed(2)}</p>
-                  </div>
-                </div>
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-sm text-slate-300">
+                      <p className="font-medium text-slate-100">Calibration flow</p>
+                      <ol className="mt-2 list-decimal space-y-1 pl-4 text-slate-300">
+                        <li>Connect the phone and allow sensor access.</li>
+                        <li>Hold still in neutral position and press Recenter Motion.</li>
+                        <li>Press Calibrate & Launch to start the 3D match.</li>
+                      </ol>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div
+                      ref={renderMountRef}
+                      className="aspect-[16/9] w-full overflow-hidden rounded-xl border border-slate-800 bg-slate-950"
+                    />
+
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">You</p>
+                        <p className="mt-1 text-2xl font-semibold text-emerald-300">{gameHud.player}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">CPU</p>
+                        <p className="mt-1 text-2xl font-semibold text-orange-300">{gameHud.cpu}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Rally</p>
+                        <p className="mt-1 text-2xl font-semibold text-slate-100">{gameHud.rally}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Controller</p>
+                        <p className="mt-1 text-sm text-slate-200">
+                          Roll {controlHud.roll.toFixed(2)} | Pitch {controlHud.pitch.toFixed(2)}
+                        </p>
+                        <p className="text-xs text-slate-400">Swing {controlHud.swing.toFixed(2)}</p>
+                      </div>
+                    </div>
+
+                    {gameHud.winner && (
+                      <div
+                        className={`rounded-xl border p-3 text-sm ${
+                          gameHud.winner === "player"
+                            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                            : "border-rose-500/40 bg-rose-500/10 text-rose-200"
+                        }`}
+                      >
+                        {gameHud.winner === "player"
+                          ? "Match won. Timing and angle control worked."
+                          : "CPU won this match. Try faster forward swings and earlier timing."}
+                      </div>
+                    )}
+                  </>
+                )}
 
                 <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-sm text-slate-300">
                   {gameHud.status}
                 </div>
-
-                {gameHud.winner && (
-                  <div
-                    className={`rounded-xl border p-3 text-sm ${
-                      gameHud.winner === "player"
-                        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-                        : "border-rose-500/40 bg-rose-500/10 text-rose-200"
-                    }`}
-                  >
-                    {gameHud.winner === "player"
-                      ? "Match won. Timing and angle control worked."
-                      : "CPU won this match. Try faster forward swings and earlier timing."}
-                  </div>
-                )}
               </div>
             ) : (
               <div className="mt-4 space-y-4 text-sm text-slate-200">
