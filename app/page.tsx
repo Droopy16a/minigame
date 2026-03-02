@@ -410,9 +410,20 @@ function createSimState(): SimState {
   return sim;
 }
 
+function resetSimState(sim: SimState) {
+  const fresh = createSimState();
+  sim.ballPos.copy(fresh.ballPos);
+  sim.ballVel.copy(fresh.ballVel);
+  sim.ballSpinSide = fresh.ballSpinSide;
+  sim.ballSpinTop = fresh.ballSpinTop;
+  sim.player = fresh.player;
+  sim.cpu = fresh.cpu;
+  sim.match = fresh.match;
+}
+
 function startSwing(avatar: AvatarSim, strength: number, roll: number, pitch: number) {
   avatar.swingT = SWING_DURATION;
-  avatar.power = clamp(strength, 0.2, 1);
+  avatar.power = clamp(strength, 0.18, 0.86);
   avatar.roll = clamp(roll, -1, 1);
   avatar.pitch = clamp(pitch, -1, 1);
   avatar.used = false;
@@ -427,21 +438,22 @@ function strikeBall(
   pitch: number,
   isServe: boolean,
 ) {
-  const forward = (isServe ? 10.8 : 12.2) + power * (isServe ? 3.6 : 4.4);
+  const effectivePower = power * (isServe ? 0.86 : 0.8);
+  const forward = (isServe ? 9.9 : 10.5) + effectivePower * (isServe ? 2.8 : 3.1);
   const toward = hitter === "player" ? -1 : 1;
   const lateral = clamp(
-    roll * 4.8 + (hitter === "cpu" ? (Math.random() - 0.5) * 1.3 : 0),
-    -7.8,
-    7.8,
+    roll * 3.7 + (hitter === "cpu" ? (Math.random() - 0.5) * 0.9 : 0),
+    -5.4,
+    5.4,
   );
   const lift =
-    (isServe ? 4.2 : 3.6) +
-    power * (isServe ? 1.55 : 1.35) +
-    clamp(-pitch * 1.15, -0.9, 1.2);
+    (isServe ? 3.8 : 3.2) +
+    effectivePower * (isServe ? 1.35 : 1.1) +
+    clamp(-pitch * 1.05, -0.75, 1.05);
 
   sim.ballVel.set(lateral, lift, toward * forward);
-  sim.ballSpinSide = roll * (2.6 + power * 3.2);
-  sim.ballSpinTop = clamp(-pitch * 3.4 + power * 1.4, -5.2, 6.2);
+  sim.ballSpinSide = roll * (2.2 + effectivePower * 2.5);
+  sim.ballSpinTop = clamp(-pitch * 2.9 + effectivePower * 1.1, -4.3, 5.1);
 
   if (isServe) {
     if (hitter === "player") {
@@ -698,7 +710,7 @@ export default function Home() {
       const dynamicStrength = clamp(
         control.swingMeter * 1.05 + clamp((control.swingForwardRate - 120) / 380, 0, 0.32),
         0.2,
-        1,
+        0.86,
       );
       control.pendingSwing = {
         strength: dynamicStrength,
@@ -1070,6 +1082,24 @@ export default function Home() {
     let raf = 0;
     let lastFrame = performance.now();
     let lastHudCommit = 0;
+    const bounceVoices = Array.from({ length: 3 }, () => new Audio("/bounce.mp3"));
+    for (const voice of bounceVoices) {
+      voice.preload = "auto";
+      voice.volume = 0.55;
+    }
+    let bounceVoiceIndex = 0;
+
+    const playBounceSound = (volume: number, playbackRate: number) => {
+      const voice = bounceVoices[bounceVoiceIndex];
+      bounceVoiceIndex = (bounceVoiceIndex + 1) % bounceVoices.length;
+      voice.pause();
+      voice.currentTime = 0;
+      voice.volume = clamp(volume, 0, 1);
+      voice.playbackRate = clamp(playbackRate, 0.65, 1.8);
+      void voice.play().catch(() => {
+        // Audio playback can fail due to browser autoplay policies.
+      });
+    };
 
     const syncHud = () => {
       const match = sim.match;
@@ -1226,6 +1256,7 @@ export default function Home() {
               const progress = 1 - sim.player.swingT / SWING_DURATION;
               if (progress > 0.18 && progress < 0.8) {
                 strikeBall(sim, "player", sim.player.power, sim.player.roll, sim.player.pitch, true);
+                playBounceSound(0.5, 1.14);
                 sim.player.used = true;
                 sim.player.flash = 0.11;
                 match.status = "Rally live";
@@ -1235,15 +1266,16 @@ export default function Home() {
             if (match.serveTimer <= 0 && sim.cpu.swingT <= 0 && sim.cpu.cooldown <= 0) {
               startSwing(
                 sim.cpu,
-                0.55 + Math.random() * 0.35,
-                clamp((Math.random() - 0.5) * 0.9, -1, 1),
-                clamp((Math.random() - 0.15) * 0.7, -1, 1),
+                0.44 + Math.random() * 0.26,
+                clamp((Math.random() - 0.5) * 0.72, -1, 1),
+                clamp((Math.random() - 0.15) * 0.6, -1, 1),
               );
             }
             if (sim.cpu.swingT > 0 && !sim.cpu.used) {
               const progress = 1 - sim.cpu.swingT / SWING_DURATION;
               if (progress > 0.24 && progress < 0.78) {
                 strikeBall(sim, "cpu", sim.cpu.power, sim.cpu.roll, sim.cpu.pitch, true);
+                playBounceSound(0.48, 1.1);
                 sim.cpu.used = true;
                 sim.cpu.flash = 0.1;
               }
@@ -1272,20 +1304,22 @@ export default function Home() {
             const bias = clamp(0.9 - Math.abs(sim.ballPos.x - sim.cpu.x), 0, 0.9);
             startSwing(
               sim.cpu,
-              clamp(0.45 + bias * 0.3 + Math.random() * 0.25, 0.45, 0.95),
-              clamp((sim.ballPos.x - sim.cpu.x) * 0.65 + (Math.random() - 0.5) * 0.28, -1, 1),
-              clamp((Math.random() - 0.2) * 0.7, -1, 1),
+              clamp(0.34 + bias * 0.22 + Math.random() * 0.18, 0.34, 0.78),
+              clamp((sim.ballPos.x - sim.cpu.x) * 0.52 + (Math.random() - 0.5) * 0.2, -1, 1),
+              clamp((Math.random() - 0.2) * 0.54, -1, 1),
             );
           }
 
           if (sim.player.swingT > 0 && !sim.player.used && canPlayerHit(sim)) {
             strikeBall(sim, "player", sim.player.power, sim.player.roll, sim.player.pitch, false);
+            playBounceSound(0.52, 1.18);
             sim.player.used = true;
             sim.player.flash = 0.12;
           }
 
           if (sim.cpu.swingT > 0 && !sim.cpu.used && canCpuHit(sim)) {
             strikeBall(sim, "cpu", sim.cpu.power, sim.cpu.roll, sim.cpu.pitch, false);
+            playBounceSound(0.5, 1.12);
             sim.cpu.used = true;
             sim.cpu.flash = 0.12;
           }
@@ -1308,6 +1342,7 @@ export default function Home() {
 
           if (!pointEnded && sim.ballPos.y <= BALL_RADIUS && match.lastHitter) {
             sim.ballPos.y = BALL_RADIUS;
+            playBounceSound(0.62, 0.9);
 
             const inBounds =
               Math.abs(sim.ballPos.x) <= COURT_HALF_WIDTH &&
@@ -1453,19 +1488,21 @@ export default function Home() {
   };
 
   const resetMatch = () => {
-    simRef.current = createSimState();
-    controlRef.current.pendingSwing = null;
-    controlRef.current.swingMeter = 0;
-    controlRef.current.yaw = 0;
-    controlRef.current.racketRoll = 0;
-    controlRef.current.racketPitch = 0;
-    controlRef.current.racketYaw = 0;
-    controlRef.current.swingPrimed = false;
-    controlRef.current.swingPrimeAxis = null;
-    controlRef.current.swingPrimeSign = 0;
-    controlRef.current.swingForwardRate = 0;
-    controlRef.current.swingSideRate = 0;
-    controlRef.current.swingLiftRate = 0;
+    resetSimState(simRef.current);
+    const control = controlRef.current;
+    control.pendingSwing = null;
+    control.swingMeter = 0;
+    control.lastSwingAt = 0;
+    control.yaw = 0;
+    control.racketRoll = 0;
+    control.racketPitch = 0;
+    control.racketYaw = 0;
+    control.swingPrimed = false;
+    control.swingPrimeAxis = null;
+    control.swingPrimeSign = 0;
+    control.swingForwardRate = 0;
+    control.swingSideRate = 0;
+    control.swingLiftRate = 0;
     setGameHud({
       player: 0,
       cpu: 0,
