@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
+import * as THREE from "three";
 
 type OrientationSample = {
   alpha: number | null;
@@ -17,7 +18,11 @@ type MotionSample = {
     beta: number | null;
     gamma: number | null;
   } | null;
-  acceleration: { x: number | null; y: number | null; z: number | null } | null;
+  acceleration: {
+    x: number | null;
+    y: number | null;
+    z: number | null;
+  } | null;
   accelerationIncludingGravity: {
     x: number | null;
     y: number | null;
@@ -35,29 +40,26 @@ type StoreEntry = {
 type PermissionState = "unknown" | "granted" | "denied";
 type ScoreOwner = "player" | "cpu";
 
+type SwingPacket = {
+  strength: number;
+  roll: number;
+  pitch: number;
+  at: number;
+};
+
 type ControlState = {
   roll: number;
   pitch: number;
-  swing: number;
-  pending: { strength: number; roll: number; pitch: number } | null;
+  swingMeter: number;
+  pendingSwing: SwingPacket | null;
   lastSwingAt: number;
   lastSeq: number;
 };
 
-type BallState = {
+type AvatarSim = {
   x: number;
-  z: number;
-  y: number;
-  vx: number;
-  vz: number;
-  vy: number;
-  radius: number;
-};
-
-type AvatarState = {
-  x: number;
-  target: number;
-  swing: number;
+  targetX: number;
+  swingT: number;
   power: number;
   roll: number;
   pitch: number;
@@ -66,51 +68,63 @@ type AvatarState = {
   flash: number;
 };
 
-type GameState = {
-  ball: BallState;
-  player: AvatarState;
-  cpu: AvatarState;
+type MatchState = {
   playerScore: number;
   cpuScore: number;
   rally: number;
   winner: ScoreOwner | null;
   server: ScoreOwner;
-  serveDelay: number;
+  serveTimer: number;
   lastHitter: ScoreOwner | null;
   expectedBounce: ScoreOwner | null;
   bounced: boolean;
   status: string;
 };
 
+type SimState = {
+  ballPos: THREE.Vector3;
+  ballVel: THREE.Vector3;
+  player: AvatarSim;
+  cpu: AvatarSim;
+  match: MatchState;
+};
+
 type PermissionRequestCapable = {
   requestPermission?: () => Promise<"granted" | "denied">;
 };
 
-const VIEW_W = 960;
-const VIEW_H = 540;
-const HALF_X = 1.04;
-const BASE_PLAYER = 0.88;
-const BASE_CPU = 0.12;
-const NET_Z = 0.5;
-const NET_H = 0.82;
+type AvatarVisual = {
+  group: THREE.Group;
+  swingPivot: THREE.Object3D;
+  bodyMaterial: THREE.MeshStandardMaterial;
+  racketMaterial: THREE.MeshStandardMaterial;
+};
 
-const PLAYER_SPEED = 2.9;
-const CPU_SPEED = 2.4;
-const GRAVITY = 7.8;
-const BOUNCE = 0.62;
-const AIR = 0.04;
+const COURT_HALF_WIDTH = 4;
+const COURT_HALF_LENGTH = 8;
+const BASELINE_PLAYER_Z = 6.3;
+const BASELINE_CPU_Z = -6.3;
+const NET_Z = 0;
+const NET_HEIGHT = 1.1;
 
-const HIT_X = 0.23;
-const HIT_Y_MIN = 0.18;
-const HIT_Y_MAX = 1.45;
+const BALL_RADIUS = 0.18;
+const GRAVITY = 24;
+const GROUND_BOUNCE = 0.62;
+const AIR_DRAG = 0.04;
 
-const SWING_DUR = 0.31;
+const PLAYER_SPEED = 7.2;
+const CPU_SPEED = 6.4;
+const RACKET_REACH_X = 0.95;
+const HIT_Y_MIN = 0.35;
+const HIT_Y_MAX = 2.9;
+
+const SWING_DURATION = 0.32;
 const SWING_COOLDOWN = 0.16;
 const SWING_TRIGGER = 0.5;
-const SWING_REARM_MS = 260;
+const SWING_REARM_MS = 250;
 
-const WIN_SCORE = 7;
 const CONNECTION_TIMEOUT_MS = 1200;
+const POINTS_TO_WIN = 7;
 
 function clamp(v: number, min: number, max: number) {
   return Math.min(max, Math.max(min, v));
@@ -133,10 +147,6 @@ function blankSample(): MotionSample {
   };
 }
 
-function opponent(owner: ScoreOwner): ScoreOwner {
-  return owner === "player" ? "cpu" : "player";
-}
-
 function getRoll(sample: MotionSample | null): number | null {
   const gamma = sample?.orientation?.gamma;
   return typeof gamma === "number" ? clamp(gamma / 48, -1, 1) : null;
@@ -149,28 +159,32 @@ function getPitch(sample: MotionSample | null): number | null {
 
 function getSwing(sample: MotionSample | null): number {
   const rate = sample?.rotationRate;
-  const g = sample?.accelerationIncludingGravity;
+  const gravity = sample?.accelerationIncludingGravity;
 
-  const a = rate?.alpha ?? 0;
-  const b = rate?.beta ?? 0;
-  const c = rate?.gamma ?? 0;
-  const gyro = Math.sqrt(a ** 2 + b ** 2 + c ** 2);
-  const gyroSwing = clamp((gyro - 62) / 315, 0, 1);
+  const alpha = rate?.alpha ?? 0;
+  const beta = rate?.beta ?? 0;
+  const gamma = rate?.gamma ?? 0;
+  const gyroMagnitude = Math.sqrt(alpha ** 2 + beta ** 2 + gamma ** 2);
+  const gyroSwing = clamp((gyroMagnitude - 62) / 315, 0, 1);
 
-  const gx = g?.x ?? 0;
-  const gy = g?.y ?? 0;
-  const gz = g?.z ?? 0;
-  const gm = Math.sqrt(gx ** 2 + gy ** 2 + gz ** 2);
-  const accelSwing = clamp((Math.abs(gm - 9.8) - 1) / 9, 0, 1);
+  const gx = gravity?.x ?? 0;
+  const gy = gravity?.y ?? 0;
+  const gz = gravity?.z ?? 0;
+  const gravityMagnitude = Math.sqrt(gx ** 2 + gy ** 2 + gz ** 2);
+  const accelSwing = clamp((Math.abs(gravityMagnitude - 9.8) - 1) / 9, 0, 1);
 
   return Math.max(gyroSwing, accelSwing);
 }
 
-function createAvatar(): AvatarState {
+function opponent(owner: ScoreOwner): ScoreOwner {
+  return owner === "player" ? "cpu" : "player";
+}
+
+function createAvatarState(): AvatarSim {
   return {
     x: 0,
-    target: 0,
-    swing: 0,
+    targetX: 0,
+    swingT: 0,
     power: 0,
     roll: 0,
     pitch: 0,
@@ -180,38 +194,40 @@ function createAvatar(): AvatarState {
   };
 }
 
-function placeServeBall(state: GameState, server: ScoreOwner) {
-  const avatar = server === "player" ? state.player : state.cpu;
-  state.ball.x = clamp(avatar.x + (server === "player" ? 0.06 : -0.06), -HALF_X * 0.86, HALF_X * 0.86);
-  state.ball.z = server === "player" ? BASE_PLAYER : BASE_CPU;
-  state.ball.y = 1.02;
-  state.ball.vx = 0;
-  state.ball.vz = 0;
-  state.ball.vy = 0;
+function placeServeBall(sim: SimState, server: ScoreOwner) {
+  const serverAvatar = server === "player" ? sim.player : sim.cpu;
+  sim.ballPos.x = clamp(serverAvatar.x + (server === "player" ? 0.24 : -0.24), -COURT_HALF_WIDTH * 0.9, COURT_HALF_WIDTH * 0.9);
+  sim.ballPos.z = server === "player" ? BASELINE_PLAYER_Z : BASELINE_CPU_Z;
+  sim.ballPos.y = 1.45;
+  sim.ballVel.set(0, 0, 0);
 }
 
-function createGame(): GameState {
-  const state: GameState = {
-    ball: { x: 0, z: BASE_PLAYER, y: 1.02, vx: 0, vz: 0, vy: 0, radius: 0.035 },
-    player: createAvatar(),
-    cpu: createAvatar(),
-    playerScore: 0,
-    cpuScore: 0,
-    rally: 0,
-    winner: null,
-    server: "player",
-    serveDelay: 0.9,
-    lastHitter: null,
-    expectedBounce: null,
-    bounced: false,
-    status: "Swing your phone to serve",
+function createSimState(): SimState {
+  const sim: SimState = {
+    ballPos: new THREE.Vector3(0, 1.45, BASELINE_PLAYER_Z),
+    ballVel: new THREE.Vector3(0, 0, 0),
+    player: createAvatarState(),
+    cpu: createAvatarState(),
+    match: {
+      playerScore: 0,
+      cpuScore: 0,
+      rally: 0,
+      winner: null,
+      server: "player",
+      serveTimer: 0.95,
+      lastHitter: null,
+      expectedBounce: null,
+      bounced: false,
+      status: "Swing your phone to serve",
+    },
   };
-  placeServeBall(state, "player");
-  return state;
+
+  placeServeBall(sim, "player");
+  return sim;
 }
 
-function startSwing(avatar: AvatarState, strength: number, roll: number, pitch: number) {
-  avatar.swing = SWING_DUR;
+function startSwing(avatar: AvatarSim, strength: number, roll: number, pitch: number) {
+  avatar.swingT = SWING_DURATION;
   avatar.power = clamp(strength, 0.2, 1);
   avatar.roll = clamp(roll, -1, 1);
   avatar.pitch = clamp(pitch, -1, 1);
@@ -219,39 +235,59 @@ function startSwing(avatar: AvatarState, strength: number, roll: number, pitch: 
   avatar.cooldown = SWING_COOLDOWN;
 }
 
-function strike(state: GameState, hitter: ScoreOwner, power: number, roll: number, pitch: number, serve: boolean) {
+function strikeBall(
+  sim: SimState,
+  hitter: ScoreOwner,
+  power: number,
+  roll: number,
+  pitch: number,
+  isServe: boolean,
+) {
+  const forward = (isServe ? 11 : 12) + power * 6;
   const toward = hitter === "player" ? -1 : 1;
-  const b = state.ball;
+  const lateral = clamp(roll * 7 + (hitter === "cpu" ? (Math.random() - 0.5) * 1.8 : 0), -9, 9);
+  const lift = (isServe ? 8.2 : 7.2) + power * 3 + clamp(-pitch * 2.1, -1.2, 2);
 
-  b.vx = clamp(roll * 1.45 + (hitter === "cpu" ? (Math.random() - 0.5) * 0.32 : 0), -2.2, 2.2);
-  b.vz = toward * ((serve ? 2.7 : 2.85) + power * 1.55);
-  b.vy = (serve ? 2.45 : 2.2) + power * 1.2 + clamp(-pitch * 0.55, -0.2, 0.65);
-  b.y = clamp(b.y, 0.3, 1.45);
+  sim.ballVel.set(lateral, lift, toward * forward);
 
-  if (serve) {
+  if (isServe) {
     if (hitter === "player") {
-      b.z = BASE_PLAYER - 0.02;
-      b.x = clamp(state.player.x + roll * 0.03, -HALF_X + 0.06, HALF_X - 0.06);
+      sim.ballPos.z = BASELINE_PLAYER_Z - 0.3;
+      sim.ballPos.x = clamp(sim.player.x + roll * 0.18, -COURT_HALF_WIDTH + 0.3, COURT_HALF_WIDTH - 0.3);
     } else {
-      b.z = BASE_CPU + 0.02;
-      b.x = clamp(state.cpu.x - roll * 0.03, -HALF_X + 0.06, HALF_X - 0.06);
+      sim.ballPos.z = BASELINE_CPU_Z + 0.3;
+      sim.ballPos.x = clamp(sim.cpu.x - roll * 0.18, -COURT_HALF_WIDTH + 0.3, COURT_HALF_WIDTH - 0.3);
     }
   }
 
-  state.lastHitter = hitter;
-  state.expectedBounce = opponent(hitter);
-  state.bounced = false;
-  state.rally = Math.max(1, state.rally + 1);
+  sim.match.lastHitter = hitter;
+  sim.match.expectedBounce = opponent(hitter);
+  sim.match.bounced = false;
+  sim.match.rally = Math.max(1, sim.match.rally + 1);
 }
 
-function canPlayerHit(state: GameState) {
-  const b = state.ball;
-  return b.vz > 0 && b.z > 0.63 && b.z < 0.99 && Math.abs(b.x - state.player.x) < HIT_X && b.y > HIT_Y_MIN && b.y < HIT_Y_MAX;
+function canPlayerHit(sim: SimState) {
+  const ball = sim.ballPos;
+  return (
+    sim.ballVel.z > 0 &&
+    ball.z > 2.2 &&
+    ball.z < COURT_HALF_LENGTH &&
+    Math.abs(ball.x - sim.player.x) <= RACKET_REACH_X &&
+    ball.y >= HIT_Y_MIN &&
+    ball.y <= HIT_Y_MAX
+  );
 }
 
-function canCpuHit(state: GameState) {
-  const b = state.ball;
-  return b.vz < 0 && b.z < 0.37 && b.z > 0.01 && Math.abs(b.x - state.cpu.x) < HIT_X && b.y > HIT_Y_MIN && b.y < HIT_Y_MAX;
+function canCpuHit(sim: SimState) {
+  const ball = sim.ballPos;
+  return (
+    sim.ballVel.z < 0 &&
+    ball.z < -2.2 &&
+    ball.z > -COURT_HALF_LENGTH &&
+    Math.abs(ball.x - sim.cpu.x) <= RACKET_REACH_X &&
+    ball.y >= HIT_Y_MIN &&
+    ball.y <= HIT_Y_MAX
+  );
 }
 
 function approach(current: number, target: number, maxDelta: number) {
@@ -259,12 +295,68 @@ function approach(current: number, target: number, maxDelta: number) {
   return Math.max(current - maxDelta, target);
 }
 
-function project(x: number, z: number, y: number) {
-  const p = 0.42 + z * 0.86;
+function createAvatarVisual(side: ScoreOwner): AvatarVisual {
+  const group = new THREE.Group();
+  const bodyColor = side === "player" ? 0x10b981 : 0xf97316;
+
+  const bodyMaterial = new THREE.MeshStandardMaterial({
+    color: bodyColor,
+    roughness: 0.35,
+    metalness: 0.08,
+  });
+  const headMaterial = new THREE.MeshStandardMaterial({
+    color: 0xfde68a,
+    roughness: 0.5,
+    metalness: 0.03,
+  });
+  const shortsMaterial = new THREE.MeshStandardMaterial({
+    color: 0x111827,
+    roughness: 0.6,
+    metalness: 0.02,
+  });
+  const handleMaterial = new THREE.MeshStandardMaterial({
+    color: 0xbfc8d6,
+    roughness: 0.3,
+    metalness: 0.35,
+  });
+  const racketMaterial = new THREE.MeshStandardMaterial({
+    color: 0x93c5fd,
+    roughness: 0.3,
+    metalness: 0.25,
+  });
+
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 0.9, 8, 12), bodyMaterial);
+  torso.position.y = 1.05;
+  group.add(torso);
+
+  const shorts = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.26, 0.36), shortsMaterial);
+  shorts.position.y = 0.44;
+  group.add(shorts);
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.23, 20, 20), headMaterial);
+  head.position.y = 1.88;
+  group.add(head);
+
+  const swingPivot = new THREE.Object3D();
+  swingPivot.position.set(side === "player" ? 0.42 : -0.42, 1.38, 0.04);
+
+  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.62, 10), handleMaterial);
+  handle.rotation.z = side === "player" ? -0.55 : 0.55;
+  handle.position.set(0, -0.3, 0);
+  swingPivot.add(handle);
+
+  const racketHead = new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.035, 14, 30), racketMaterial);
+  racketHead.rotation.x = Math.PI / 2;
+  racketHead.position.set(side === "player" ? 0.25 : -0.25, -0.58, 0);
+  swingPivot.add(racketHead);
+
+  group.add(swingPivot);
+
   return {
-    x: VIEW_W / 2 + x * 305 * p,
-    y: 58 + z * 412 - y * 145 * p,
-    p,
+    group,
+    swingPivot,
+    bodyMaterial,
+    racketMaterial,
   };
 }
 
@@ -276,29 +368,52 @@ export default function Home() {
   const [latest, setLatest] = useState<StoreEntry | null>(null);
   const [permission, setPermission] = useState<PermissionState>("unknown");
   const [sensorAvailable, setSensorAvailable] = useState(true);
-  const [clock, setClock] = useState(Date.now());
-  const [phoneTelemetry, setPhoneTelemetry] = useState({ roll: 0, pitch: 0, swing: 0, packets: 0 });
-  const [gameHud, setGameHud] = useState({ player: 0, cpu: 0, rally: 0, winner: null as ScoreOwner | null, status: "Swing your phone to serve" });
+  const [clock, setClock] = useState(() => Date.now());
+  const [phoneTelemetry, setPhoneTelemetry] = useState({
+    roll: 0,
+    pitch: 0,
+    swing: 0,
+    packets: 0,
+  });
+  const [gameHud, setGameHud] = useState({
+    player: 0,
+    cpu: 0,
+    rally: 0,
+    winner: null as ScoreOwner | null,
+    status: "Swing your phone to serve",
+  });
   const [controlHud, setControlHud] = useState({ roll: 0, pitch: 0, swing: 0 });
 
   const latestRef = useRef<MotionSample | null>(null);
   const sendingRef = useRef(false);
   const packetsRef = useRef(0);
-  const controlRef = useRef<ControlState>({ roll: 0, pitch: 0, swing: 0, pending: null, lastSwingAt: 0, lastSeq: -1 });
+  const controlRef = useRef<ControlState>({
+    roll: 0,
+    pitch: 0,
+    swingMeter: 0,
+    pendingSwing: null,
+    lastSwingAt: 0,
+    lastSeq: -1,
+  });
   const connectedRef = useRef(false);
-  const gameRef = useRef<GameState>(createGame());
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const simRef = useRef<SimState>(createSimState());
+  const renderMountRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roleParam = params.get("role");
     const sessionParam = params.get("session");
-    if (roleParam === "phone") setRole("phone");
+
+    if (roleParam === "phone") {
+      setRole("phone");
+    }
+
     setSession(sessionParam || makeSessionId());
   }, []);
 
   useEffect(() => {
     if (!session) return;
+
     if (role !== "host") {
       setPhoneUrl("");
       setQrDataUrl("");
@@ -320,9 +435,13 @@ export default function Home() {
     let mounted = true;
     const poll = async () => {
       try {
-        const res = await fetch(`/api/motion?session=${encodeURIComponent(session)}`, { cache: "no-store" });
+        const res = await fetch(`/api/motion?session=${encodeURIComponent(session)}`, {
+          cache: "no-store",
+        });
         const data = await res.json();
-        if (mounted && data?.entry) setLatest(data.entry as StoreEntry);
+        if (mounted && data?.entry) {
+          setLatest(data.entry as StoreEntry);
+        }
       } catch {
         // Ignore transient errors.
       }
@@ -362,15 +481,20 @@ export default function Home() {
     const pitch = getPitch(latest.sample);
     const swing = getSwing(latest.sample);
 
-    if (roll !== null) control.roll = roll;
-    if (pitch !== null) control.pitch = pitch;
+    if (roll !== null) {
+      control.roll = roll;
+    }
+    if (pitch !== null) {
+      control.pitch = pitch;
+    }
 
-    control.swing = Math.max(control.swing * 0.58, swing);
+    control.swingMeter = Math.max(control.swingMeter * 0.58, swing);
     if (swing > SWING_TRIGGER && latest.t - control.lastSwingAt > SWING_REARM_MS) {
-      control.pending = {
+      control.pendingSwing = {
         strength: clamp(swing * 1.18, 0.2, 1),
         roll: control.roll,
         pitch: control.pitch,
+        at: latest.t,
       };
       control.lastSwingAt = latest.t;
     }
@@ -383,8 +507,12 @@ export default function Home() {
     const hasOrientation = "DeviceOrientationEvent" in window;
     setSensorAvailable(hasMotion || hasOrientation);
 
-    const motionCtor = (window as Window & { DeviceMotionEvent?: PermissionRequestCapable }).DeviceMotionEvent;
-    const orientationCtor = (window as Window & { DeviceOrientationEvent?: PermissionRequestCapable }).DeviceOrientationEvent;
+    const motionCtor = (
+      window as Window & { DeviceMotionEvent?: PermissionRequestCapable }
+    ).DeviceMotionEvent;
+    const orientationCtor = (
+      window as Window & { DeviceOrientationEvent?: PermissionRequestCapable }
+    ).DeviceOrientationEvent;
 
     if (!motionCtor?.requestPermission && !orientationCtor?.requestPermission) {
       setPermission("granted");
@@ -443,6 +571,7 @@ export default function Home() {
           }
         : null;
       sample.interval = event.interval ?? null;
+
       latestRef.current = sample;
       publishPreview();
     };
@@ -455,6 +584,7 @@ export default function Home() {
         gamma: event.gamma ?? null,
         absolute: event.absolute ?? null,
       };
+
       latestRef.current = sample;
       publishPreview();
     };
@@ -465,18 +595,20 @@ export default function Home() {
     const interval = window.setInterval(async () => {
       if (sendingRef.current || !mounted) return;
       sendingRef.current = true;
+
       try {
         await fetch("/api/motion", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session, sample: latestRef.current }),
         });
+
         packetsRef.current += 1;
         if (packetsRef.current % 4 === 0) {
           setPhoneTelemetry((prev) => ({ ...prev, packets: packetsRef.current }));
         }
       } catch {
-        // Ignore transient errors.
+        // Ignore transient network errors.
       } finally {
         sendingRef.current = false;
       }
@@ -492,413 +624,518 @@ export default function Home() {
 
   useEffect(() => {
     if (role !== "host") return;
-    gameRef.current = createGame();
-    controlRef.current = { roll: 0, pitch: 0, swing: 0, pending: null, lastSwingAt: 0, lastSeq: -1 };
-    setGameHud({ player: 0, cpu: 0, rally: 0, winner: null, status: "Swing your phone to serve" });
+
+    simRef.current = createSimState();
+    controlRef.current = {
+      roll: 0,
+      pitch: 0,
+      swingMeter: 0,
+      pendingSwing: null,
+      lastSwingAt: 0,
+      lastSeq: -1,
+    };
+    setGameHud({
+      player: 0,
+      cpu: 0,
+      rally: 0,
+      winner: null,
+      status: "Swing your phone to serve",
+    });
     setControlHud({ roll: 0, pitch: 0, swing: 0 });
   }, [role]);
 
   useEffect(() => {
     if (role !== "host") return;
+    if (!renderMountRef.current) return;
 
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    const mount = renderMountRef.current;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color("#0c2138");
+    scene.fog = new THREE.Fog(0x0c2138, 18, 34);
 
-    let raf = 0;
-    let lastFrame = performance.now();
-    let lastHud = 0;
-    let dpr = 1;
-    let vw = 1;
-    let vh = 1;
+    const camera = new THREE.PerspectiveCamera(
+      52,
+      mount.clientWidth / Math.max(1, mount.clientHeight),
+      0.1,
+      80,
+    );
+    camera.position.set(0, 7.4, 13.2);
+    camera.lookAt(0, 1.4, -0.8);
 
-    const syncHud = () => {
-      const state = gameRef.current;
-      const control = controlRef.current;
-      setGameHud({
-        player: state.playerScore,
-        cpu: state.cpuScore,
-        rally: state.rally,
-        winner: state.winner,
-        status: state.status,
-      });
-      setControlHud({ roll: control.roll, pitch: control.pitch, swing: control.swing });
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(mount.clientWidth, mount.clientHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    mount.appendChild(renderer.domElement);
+
+    const hemi = new THREE.HemisphereLight(0xcde8ff, 0x27435e, 0.7);
+    scene.add(hemi);
+
+    const dir = new THREE.DirectionalLight(0xffffff, 1.05);
+    dir.position.set(-5, 12, 8);
+    dir.castShadow = true;
+    dir.shadow.mapSize.set(1024, 1024);
+    dir.shadow.camera.near = 1;
+    dir.shadow.camera.far = 32;
+    dir.shadow.camera.left = -12;
+    dir.shadow.camera.right = 12;
+    dir.shadow.camera.top = 12;
+    dir.shadow.camera.bottom = -12;
+    scene.add(dir);
+
+    const arena = new THREE.Mesh(
+      new THREE.PlaneGeometry(38, 34),
+      new THREE.MeshStandardMaterial({
+        color: 0x315572,
+        roughness: 0.94,
+        metalness: 0.02,
+      }),
+    );
+    arena.rotation.x = -Math.PI / 2;
+    arena.receiveShadow = true;
+    scene.add(arena);
+
+    const court = new THREE.Mesh(
+      new THREE.BoxGeometry(COURT_HALF_WIDTH * 2, 0.08, COURT_HALF_LENGTH * 2),
+      new THREE.MeshStandardMaterial({
+        color: 0x1f6b8d,
+        roughness: 0.78,
+        metalness: 0.04,
+      }),
+    );
+    court.receiveShadow = true;
+    scene.add(court);
+
+    const lineMaterial = new THREE.LineBasicMaterial({ color: 0xe2f0ff });
+    const lines = new THREE.Group();
+    const addLine = (x1: number, z1: number, x2: number, z2: number) => {
+      const g = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(x1, 0.05, z1),
+        new THREE.Vector3(x2, 0.05, z2),
+      ]);
+      lines.add(new THREE.Line(g, lineMaterial));
     };
 
-    const pointTo = (winner: ScoreOwner, reason: string) => {
-      const state = gameRef.current;
-      if (state.winner) return;
+    addLine(-COURT_HALF_WIDTH, -COURT_HALF_LENGTH, COURT_HALF_WIDTH, -COURT_HALF_LENGTH);
+    addLine(-COURT_HALF_WIDTH, COURT_HALF_LENGTH, COURT_HALF_WIDTH, COURT_HALF_LENGTH);
+    addLine(-COURT_HALF_WIDTH, -COURT_HALF_LENGTH, -COURT_HALF_WIDTH, COURT_HALF_LENGTH);
+    addLine(COURT_HALF_WIDTH, -COURT_HALF_LENGTH, COURT_HALF_WIDTH, COURT_HALF_LENGTH);
+    addLine(-COURT_HALF_WIDTH, NET_Z, COURT_HALF_WIDTH, NET_Z);
+    addLine(-COURT_HALF_WIDTH, -2.2, COURT_HALF_WIDTH, -2.2);
+    addLine(-COURT_HALF_WIDTH, 2.2, COURT_HALF_WIDTH, 2.2);
+    addLine(0, -2.2, 0, 2.2);
+    scene.add(lines);
 
-      if (winner === "player") state.playerScore += 1;
-      else state.cpuScore += 1;
+    const net = new THREE.Mesh(
+      new THREE.BoxGeometry(COURT_HALF_WIDTH * 2 + 0.16, NET_HEIGHT, 0.08),
+      new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.62, metalness: 0.04 }),
+    );
+    net.position.set(0, NET_HEIGHT / 2, NET_Z);
+    net.castShadow = true;
+    scene.add(net);
 
-      state.rally = 0;
-      state.status = reason;
-      state.lastHitter = null;
-      state.expectedBounce = null;
-      state.bounced = false;
-      state.player.swing = 0;
-      state.player.cooldown = 0;
-      state.player.used = false;
-      state.player.flash = 0;
-      state.cpu.swing = 0;
-      state.cpu.cooldown = 0;
-      state.cpu.used = false;
-      state.cpu.flash = 0;
+    const topTape = new THREE.Mesh(
+      new THREE.BoxGeometry(COURT_HALF_WIDTH * 2 + 0.2, 0.06, 0.1),
+      new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.2, metalness: 0.12 }),
+    );
+    topTape.position.set(0, NET_HEIGHT + 0.03, NET_Z);
+    scene.add(topTape);
 
-      if (state.playerScore >= WIN_SCORE || state.cpuScore >= WIN_SCORE) {
-        state.winner = winner;
-        state.status = winner === "player" ? "You won the match" : "CPU won the match";
-        state.ball = { ...state.ball, x: 0, z: NET_Z, y: 0, vx: 0, vz: 0, vy: 0 };
+    const postGeom = new THREE.CylinderGeometry(0.05, 0.06, NET_HEIGHT + 0.45, 14);
+    const postMat = new THREE.MeshStandardMaterial({ color: 0xdbeafe, roughness: 0.25, metalness: 0.22 });
+    const leftPost = new THREE.Mesh(postGeom, postMat);
+    leftPost.position.set(-COURT_HALF_WIDTH - 0.12, (NET_HEIGHT + 0.45) / 2, NET_Z);
+    const rightPost = leftPost.clone();
+    rightPost.position.x = COURT_HALF_WIDTH + 0.12;
+    scene.add(leftPost, rightPost);
+
+    const ballMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(BALL_RADIUS, 24, 24),
+      new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.18, metalness: 0.05 }),
+    );
+    ballMesh.castShadow = true;
+    scene.add(ballMesh);
+
+    const ballShadow = new THREE.Mesh(
+      new THREE.CircleGeometry(BALL_RADIUS * 1.9, 24),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.25 }),
+    );
+    ballShadow.rotation.x = -Math.PI / 2;
+    ballShadow.position.y = 0.01;
+    scene.add(ballShadow);
+
+    const playerVisual = createAvatarVisual("player");
+    playerVisual.group.position.set(0, 0, BASELINE_PLAYER_Z);
+    playerVisual.group.castShadow = true;
+    playerVisual.group.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.castShadow = true;
+      }
+    });
+    scene.add(playerVisual.group);
+
+    const cpuVisual = createAvatarVisual("cpu");
+    cpuVisual.group.position.set(0, 0, BASELINE_CPU_Z);
+    cpuVisual.group.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.castShadow = true;
+      }
+    });
+    scene.add(cpuVisual.group);
+
+    const resize = () => {
+      const w = mount.clientWidth;
+      const h = Math.max(1, mount.clientHeight);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    };
+    window.addEventListener("resize", resize);
+
+    const sim = simRef.current;
+    let raf = 0;
+    let lastFrame = performance.now();
+    let lastHudCommit = 0;
+
+    const syncHud = () => {
+      const match = sim.match;
+      const control = controlRef.current;
+      setGameHud({
+        player: match.playerScore,
+        cpu: match.cpuScore,
+        rally: match.rally,
+        winner: match.winner,
+        status: match.status,
+      });
+      setControlHud({
+        roll: control.roll,
+        pitch: control.pitch,
+        swing: control.swingMeter,
+      });
+    };
+
+    const awardPoint = (winner: ScoreOwner, reason: string) => {
+      const match = sim.match;
+      if (match.winner) return;
+
+      if (winner === "player") {
+        match.playerScore += 1;
+      } else {
+        match.cpuScore += 1;
+      }
+
+      match.rally = 0;
+      match.status = reason;
+      match.lastHitter = null;
+      match.expectedBounce = null;
+      match.bounced = false;
+
+      sim.player.swingT = 0;
+      sim.player.used = false;
+      sim.player.cooldown = 0;
+      sim.player.flash = 0;
+      sim.cpu.swingT = 0;
+      sim.cpu.used = false;
+      sim.cpu.cooldown = 0;
+      sim.cpu.flash = 0;
+
+      if (match.playerScore >= POINTS_TO_WIN || match.cpuScore >= POINTS_TO_WIN) {
+        match.winner = winner;
+        match.status = winner === "player" ? "You won the match" : "CPU won the match";
+        sim.ballPos.set(0, BALL_RADIUS, 0);
+        sim.ballVel.set(0, 0, 0);
         syncHud();
         return;
       }
 
-      state.server = state.server === "player" ? "cpu" : "player";
-      state.serveDelay = 0.85;
-      placeServeBall(state, state.server);
+      match.server = match.server === "player" ? "cpu" : "player";
+      match.serveTimer = 0.85;
+      placeServeBall(sim, match.server);
       syncHud();
     };
 
-    const resize = () => {
-      const rect = canvas.getBoundingClientRect();
-      vw = Math.max(1, rect.width);
-      vh = Math.max(1, rect.height);
-      dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.max(1, Math.floor(vw * dpr));
-      canvas.height = Math.max(1, Math.floor(vh * dpr));
+    const updateAvatarVisual = (
+      visual: AvatarVisual,
+      avatar: AvatarSim,
+      side: ScoreOwner,
+    ) => {
+      const progress = avatar.swingT > 0 ? clamp(1 - avatar.swingT / SWING_DURATION, 0, 1) : 0;
+      const baseZ = side === "player" ? -0.82 : 0.82;
+      const sweepZ = side === "player" ? 2.25 : -2.25;
+
+      visual.swingPivot.rotation.set(
+        0.25 + progress * 0.55 + avatar.pitch * 0.25,
+        side === "player" ? 0.2 : -0.2,
+        baseZ + sweepZ * progress + avatar.roll * (side === "player" ? 0.45 : -0.45),
+      );
+
+      if (avatar.flash > 0) {
+        visual.bodyMaterial.emissive.setHex(side === "player" ? 0x064e3b : 0x7c2d12);
+        visual.bodyMaterial.emissiveIntensity = 0.8;
+        visual.racketMaterial.emissive.setHex(0xfef08a);
+        visual.racketMaterial.emissiveIntensity = 0.65;
+      } else {
+        visual.bodyMaterial.emissive.setHex(0x000000);
+        visual.bodyMaterial.emissiveIntensity = 0;
+        visual.racketMaterial.emissive.setHex(0x000000);
+        visual.racketMaterial.emissiveIntensity = 0;
+      }
     };
 
-    const drawAvatar = (avatar: AvatarState, side: ScoreOwner, color: string, flash: string) => {
-      const z = side === "player" ? BASE_PLAYER : BASE_CPU;
-      const base = project(avatar.x, z, 0);
-      const scale = base.p;
-      const bodyH = 84 * scale;
-      const bodyW = 28 * scale;
+    const animate = (now: number) => {
+      const dt = Math.min((now - lastFrame) / 1000, 0.033);
+      lastFrame = now;
 
-      ctx.fillStyle = avatar.flash > 0 ? flash : color;
-      ctx.beginPath();
-      ctx.ellipse(base.x, base.y - bodyH * 0.6, bodyW * 0.6, bodyH * 0.75, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = "rgba(8,20,35,0.5)";
-      ctx.beginPath();
-      ctx.ellipse(base.x, base.y + 3, bodyW * 0.85, bodyW * 0.35, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      const progress = avatar.swing > 0 ? clamp(1 - avatar.swing / SWING_DUR, 0, 1) : 0;
-      const anchorX = base.x + (side === "player" ? bodyW * 0.58 : -bodyW * 0.58);
-      const anchorY = base.y - bodyH * 0.72;
-      const baseAngle = side === "player" ? -2.2 : 0.95;
-      const sweep = side === "player" ? 2.3 : -2.3;
-      const angle = baseAngle + sweep * progress + avatar.roll * (side === "player" ? 0.45 : -0.45);
-
-      const handle = 31 * scale;
-      const head = 12 * scale;
-      const rx = anchorX + Math.cos(angle) * handle;
-      const ry = anchorY + Math.sin(angle) * handle;
-
-      ctx.strokeStyle = "#dbeafe";
-      ctx.lineWidth = Math.max(2, 2.1 * scale);
-      ctx.beginPath();
-      ctx.moveTo(anchorX, anchorY);
-      ctx.lineTo(rx, ry);
-      ctx.stroke();
-
-      ctx.strokeStyle = avatar.flash > 0 ? "#fde68a" : "#93c5fd";
-      ctx.beginPath();
-      ctx.ellipse(rx, ry, head, head * 1.26, angle, 0, Math.PI * 2);
-      ctx.stroke();
-    };
-
-    const frame = (nowMs: number) => {
-      const dt = Math.min((nowMs - lastFrame) / 1000, 0.033);
-      lastFrame = nowMs;
-
-      const state = gameRef.current;
+      const match = sim.match;
       const control = controlRef.current;
 
-      control.swing = Math.max(0, control.swing - dt * 1.25);
+      control.swingMeter = Math.max(0, control.swingMeter - dt * 1.3);
 
-      if (control.pending && connectedRef.current && !state.winner && state.player.cooldown <= 0 && state.player.swing <= 0) {
-        const event = control.pending;
-        control.pending = null;
-        startSwing(state.player, event.strength, event.roll, event.pitch);
+      if (
+        control.pendingSwing &&
+        connectedRef.current &&
+        !match.winner &&
+        sim.player.cooldown <= 0 &&
+        sim.player.swingT <= 0
+      ) {
+        const event = control.pendingSwing;
+        control.pendingSwing = null;
+        startSwing(sim.player, event.strength, event.roll, event.pitch);
       }
 
-      const b = state.ball;
-      const pLimit = HALF_X - 0.12;
-      const cLimit = HALF_X - 0.16;
+      const playerLimit = COURT_HALF_WIDTH - 0.6;
+      const cpuLimit = COURT_HALF_WIDTH - 0.75;
 
-      if (state.lastHitter === null) {
-        state.player.target = clamp(b.x * 0.8, -pLimit, pLimit);
-        state.cpu.target = clamp(b.x * 0.8, -cLimit, cLimit);
+      if (match.lastHitter === null) {
+        sim.player.targetX = clamp(sim.ballPos.x * 0.8, -playerLimit, playerLimit);
+        sim.cpu.targetX = clamp(sim.ballPos.x * 0.8, -cpuLimit, cpuLimit);
       } else {
-        state.player.target = b.vz > 0 || b.z > NET_Z ? clamp(b.x + b.vx * 0.14, -pLimit, pLimit) : clamp(b.x * 0.35, -0.45, 0.45);
-        state.cpu.target = b.vz < 0 || b.z < NET_Z ? clamp(b.x + b.vx * 0.14, -cLimit, cLimit) : clamp(b.x * 0.35, -0.45, 0.45);
+        sim.player.targetX =
+          sim.ballVel.z > 0 || sim.ballPos.z > NET_Z
+            ? clamp(sim.ballPos.x + sim.ballVel.x * 0.08, -playerLimit, playerLimit)
+            : clamp(sim.ballPos.x * 0.35, -1.2, 1.2);
+
+        sim.cpu.targetX =
+          sim.ballVel.z < 0 || sim.ballPos.z < NET_Z
+            ? clamp(sim.ballPos.x + sim.ballVel.x * 0.08, -cpuLimit, cpuLimit)
+            : clamp(sim.ballPos.x * 0.35, -1.2, 1.2);
       }
 
-      state.player.x = approach(state.player.x, state.player.target, PLAYER_SPEED * dt);
-      state.cpu.x = approach(state.cpu.x, state.cpu.target, CPU_SPEED * dt);
+      sim.player.x = approach(sim.player.x, sim.player.targetX, PLAYER_SPEED * dt);
+      sim.cpu.x = approach(sim.cpu.x, sim.cpu.targetX, CPU_SPEED * dt);
 
-      for (const avatar of [state.player, state.cpu]) {
+      for (const avatar of [sim.player, sim.cpu]) {
         avatar.cooldown = Math.max(0, avatar.cooldown - dt);
         avatar.flash = Math.max(0, avatar.flash - dt);
-        if (avatar.swing > 0) avatar.swing = Math.max(0, avatar.swing - dt);
+        if (avatar.swingT > 0) {
+          avatar.swingT = Math.max(0, avatar.swingT - dt);
+        }
       }
 
-      let ended = false;
-      if (!state.winner && connectedRef.current) {
-        if (state.lastHitter === null) {
-          state.serveDelay = Math.max(0, state.serveDelay - dt);
-          const serverAvatar = state.server === "player" ? state.player : state.cpu;
-          const z = state.server === "player" ? BASE_PLAYER : BASE_CPU;
-          b.x += (serverAvatar.x - b.x) * 0.24;
-          b.z = z;
-          b.y = 1.03 + Math.sin(nowMs * 0.006) * 0.02;
+      let pointEnded = false;
 
-          if (state.server === "player") {
-            if (state.serveDelay <= 0 && state.player.swing > 0 && !state.player.used) {
-              const progress = 1 - state.player.swing / SWING_DUR;
-              if (progress > 0.2 && progress < 0.74) {
-                strike(state, "player", state.player.power, state.player.roll, state.player.pitch, true);
-                state.player.used = true;
-                state.player.flash = 0.12;
-                state.status = "Rally live";
+      if (!match.winner && connectedRef.current) {
+        if (match.lastHitter === null) {
+          match.serveTimer = Math.max(0, match.serveTimer - dt);
+
+          const serverAvatar = match.server === "player" ? sim.player : sim.cpu;
+          const serveZ = match.server === "player" ? BASELINE_PLAYER_Z : BASELINE_CPU_Z;
+          sim.ballPos.x += (serverAvatar.x - sim.ballPos.x) * 0.22;
+          sim.ballPos.z = serveZ;
+          sim.ballPos.y = 1.45 + Math.sin(now * 0.006) * 0.06;
+
+          if (match.server === "player") {
+            if (match.serveTimer <= 0 && sim.player.swingT > 0 && !sim.player.used) {
+              const progress = 1 - sim.player.swingT / SWING_DURATION;
+              if (progress > 0.2 && progress < 0.76) {
+                strikeBall(sim, "player", sim.player.power, sim.player.roll, sim.player.pitch, true);
+                sim.player.used = true;
+                sim.player.flash = 0.11;
+                match.status = "Rally live";
               }
             }
           } else {
-            if (state.serveDelay <= 0 && state.cpu.swing <= 0 && state.cpu.cooldown <= 0) {
-              startSwing(state.cpu, 0.55 + Math.random() * 0.35, clamp((Math.random() - 0.5) * 0.9, -1, 1), clamp((Math.random() - 0.1) * 0.8, -1, 1));
+            if (match.serveTimer <= 0 && sim.cpu.swingT <= 0 && sim.cpu.cooldown <= 0) {
+              startSwing(
+                sim.cpu,
+                0.55 + Math.random() * 0.35,
+                clamp((Math.random() - 0.5) * 0.9, -1, 1),
+                clamp((Math.random() - 0.15) * 0.7, -1, 1),
+              );
             }
-            if (state.cpu.swing > 0 && !state.cpu.used) {
-              const progress = 1 - state.cpu.swing / SWING_DUR;
-              if (progress > 0.24 && progress < 0.72) {
-                strike(state, "cpu", state.cpu.power, state.cpu.roll, state.cpu.pitch, true);
-                state.cpu.used = true;
-                state.cpu.flash = 0.1;
+            if (sim.cpu.swingT > 0 && !sim.cpu.used) {
+              const progress = 1 - sim.cpu.swingT / SWING_DURATION;
+              if (progress > 0.26 && progress < 0.74) {
+                strikeBall(sim, "cpu", sim.cpu.power, sim.cpu.roll, sim.cpu.pitch, true);
+                sim.cpu.used = true;
+                sim.cpu.flash = 0.1;
               }
             }
           }
         } else {
-          const prevZ = b.z;
-          const prevY = b.y;
+          const prevZ = sim.ballPos.z;
+          const prevY = sim.ballPos.y;
 
-          b.vy -= GRAVITY * dt;
-          b.vx *= 1 - AIR * dt;
-          b.vz *= 1 - AIR * dt;
-          b.x += b.vx * dt;
-          b.z += b.vz * dt;
-          b.y += b.vy * dt;
+          sim.ballVel.y -= GRAVITY * dt;
+          sim.ballVel.x *= 1 - AIR_DRAG * dt;
+          sim.ballVel.z *= 1 - AIR_DRAG * dt;
+          sim.ballPos.addScaledVector(sim.ballVel, dt);
 
-          if (b.vz < -0.1 && b.z < 0.38 && state.cpu.swing <= 0 && state.cpu.cooldown <= 0) {
-            const bias = clamp(0.5 - Math.abs(b.x - state.cpu.x), 0, 0.5);
-            startSwing(state.cpu, clamp(0.45 + bias + Math.random() * 0.25, 0.45, 0.95), clamp((b.x - state.cpu.x) * 1.6 + (Math.random() - 0.5) * 0.35, -1, 1), clamp((Math.random() - 0.2) * 0.8, -1, 1));
+          if (
+            sim.ballVel.z < -0.45 &&
+            sim.ballPos.z < -2.1 &&
+            sim.cpu.swingT <= 0 &&
+            sim.cpu.cooldown <= 0
+          ) {
+            const bias = clamp(0.9 - Math.abs(sim.ballPos.x - sim.cpu.x), 0, 0.9);
+            startSwing(
+              sim.cpu,
+              clamp(0.45 + bias * 0.3 + Math.random() * 0.25, 0.45, 0.95),
+              clamp((sim.ballPos.x - sim.cpu.x) * 0.65 + (Math.random() - 0.5) * 0.28, -1, 1),
+              clamp((Math.random() - 0.2) * 0.7, -1, 1),
+            );
           }
 
-          if (state.player.swing > 0 && !state.player.used && canPlayerHit(state)) {
-            strike(state, "player", state.player.power, state.player.roll, state.player.pitch, false);
-            state.player.used = true;
-            state.player.flash = 0.12;
+          if (sim.player.swingT > 0 && !sim.player.used && canPlayerHit(sim)) {
+            strikeBall(sim, "player", sim.player.power, sim.player.roll, sim.player.pitch, false);
+            sim.player.used = true;
+            sim.player.flash = 0.12;
           }
 
-          if (state.cpu.swing > 0 && !state.cpu.used && canCpuHit(state)) {
-            strike(state, "cpu", state.cpu.power, state.cpu.roll, state.cpu.pitch, false);
-            state.cpu.used = true;
-            state.cpu.flash = 0.12;
+          if (sim.cpu.swingT > 0 && !sim.cpu.used && canCpuHit(sim)) {
+            strikeBall(sim, "cpu", sim.cpu.power, sim.cpu.roll, sim.cpu.pitch, false);
+            sim.cpu.used = true;
+            sim.cpu.flash = 0.12;
           }
 
-          if (state.lastHitter) {
-            const crossed = (prevZ - NET_Z) * (b.z - NET_Z) <= 0 && Math.abs(b.z - prevZ) > 1e-6;
-            if (crossed) {
-              const t = (NET_Z - prevZ) / (b.z - prevZ);
-              const yAtNet = prevY + (b.y - prevY) * t;
-              if (yAtNet < NET_H - 0.02) {
-                pointTo(opponent(state.lastHitter), "Into the net");
-                ended = true;
+          if (match.lastHitter) {
+            const crossedNet =
+              (prevZ > NET_Z && sim.ballPos.z <= NET_Z) ||
+              (prevZ < NET_Z && sim.ballPos.z >= NET_Z);
+
+            if (crossedNet) {
+              const dz = sim.ballPos.z - prevZ;
+              const t = Math.abs(dz) < 1e-6 ? 0 : (NET_Z - prevZ) / dz;
+              const yAtNet = prevY + (sim.ballPos.y - prevY) * t;
+              if (yAtNet < NET_HEIGHT) {
+                awardPoint(opponent(match.lastHitter), "Into the net");
+                pointEnded = true;
               }
             }
           }
 
-          if (!ended && b.y <= 0 && state.lastHitter) {
-            b.y = 0;
-            const inBounds = Math.abs(b.x) <= HALF_X && b.z >= 0 && b.z <= 1;
-            const side: ScoreOwner = b.z >= NET_Z ? "player" : "cpu";
+          if (!pointEnded && sim.ballPos.y <= BALL_RADIUS && match.lastHitter) {
+            sim.ballPos.y = BALL_RADIUS;
 
-            if (!inBounds || side !== state.expectedBounce) {
-              pointTo(opponent(state.lastHitter), "Shot out");
-              ended = true;
-            } else if (state.bounced) {
-              pointTo(state.lastHitter, "Second bounce");
-              ended = true;
+            const inBounds =
+              Math.abs(sim.ballPos.x) <= COURT_HALF_WIDTH &&
+              sim.ballPos.z >= -COURT_HALF_LENGTH &&
+              sim.ballPos.z <= COURT_HALF_LENGTH;
+            const bounceSide: ScoreOwner = sim.ballPos.z >= NET_Z ? "player" : "cpu";
+
+            if (!inBounds || bounceSide !== match.expectedBounce) {
+              awardPoint(opponent(match.lastHitter), "Shot out");
+              pointEnded = true;
+            } else if (match.bounced) {
+              awardPoint(match.lastHitter, "Second bounce");
+              pointEnded = true;
             } else {
-              state.bounced = true;
-              b.vy = Math.max(Math.abs(b.vy) * BOUNCE, 1.05);
-              b.vx *= 0.94;
-              b.vz *= 0.96;
+              match.bounced = true;
+              sim.ballVel.y = Math.max(Math.abs(sim.ballVel.y) * GROUND_BOUNCE, 4.4);
+              sim.ballVel.x *= 0.93;
+              sim.ballVel.z *= 0.95;
             }
           }
 
-          if (!ended && state.lastHitter && (Math.abs(b.x) > HALF_X + 0.4 || b.z < -0.28 || b.z > 1.28)) {
-            pointTo(opponent(state.lastHitter), "Ball sailed long");
-            ended = true;
+          if (
+            !pointEnded &&
+            match.lastHitter &&
+            (Math.abs(sim.ballPos.x) > COURT_HALF_WIDTH + 2 ||
+              sim.ballPos.z < -COURT_HALF_LENGTH - 4 ||
+              sim.ballPos.z > COURT_HALF_LENGTH + 4)
+          ) {
+            awardPoint(opponent(match.lastHitter), "Ball sailed long");
+            pointEnded = true;
           }
         }
       }
 
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, vw, vh);
+      playerVisual.group.position.x = sim.player.x;
+      cpuVisual.group.position.x = sim.cpu.x;
+      updateAvatarVisual(playerVisual, sim.player, "player");
+      updateAvatarVisual(cpuVisual, sim.cpu, "cpu");
 
-      const scale = Math.min(vw / VIEW_W, vh / VIEW_H);
-      const ox = (vw - VIEW_W * scale) / 2;
-      const oy = (vh - VIEW_H * scale) / 2;
-      ctx.save();
-      ctx.translate(ox, oy);
-      ctx.scale(scale, scale);
+      ballMesh.position.copy(sim.ballPos);
+      ballShadow.position.set(sim.ballPos.x, 0.01, sim.ballPos.z);
+      const shadowScale = clamp(1.8 - sim.ballPos.y * 0.22, 0.55, 1.6);
+      ballShadow.scale.set(shadowScale, shadowScale, shadowScale);
 
-      const bg = ctx.createLinearGradient(0, 0, 0, VIEW_H);
-      bg.addColorStop(0, "#0f2f4f");
-      bg.addColorStop(1, "#062139");
-      ctx.fillStyle = bg;
-      ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+      camera.position.x = THREE.MathUtils.lerp(camera.position.x, sim.ballPos.x * 0.16, 0.05);
+      camera.lookAt(sim.ballPos.x * 0.1, 1.3, -0.8);
 
-      const farL = project(-HALF_X, 0, 0);
-      const farR = project(HALF_X, 0, 0);
-      const nearR = project(HALF_X, 1, 0);
-      const nearL = project(-HALF_X, 1, 0);
+      renderer.render(scene, camera);
 
-      ctx.fillStyle = "#1f6b8d";
-      ctx.beginPath();
-      ctx.moveTo(farL.x, farL.y);
-      ctx.lineTo(farR.x, farR.y);
-      ctx.lineTo(nearR.x, nearR.y);
-      ctx.lineTo(nearL.x, nearL.y);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.strokeStyle = "rgba(228,244,255,0.8)";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      const netL0 = project(-HALF_X * 1.02, NET_Z, 0);
-      const netR0 = project(HALF_X * 1.02, NET_Z, 0);
-      const netL1 = project(-HALF_X * 1.02, NET_Z, NET_H);
-      const netR1 = project(HALF_X * 1.02, NET_Z, NET_H);
-      ctx.beginPath();
-      ctx.moveTo(netL0.x, netL0.y);
-      ctx.lineTo(netR0.x, netR0.y);
-      ctx.moveTo(netL1.x, netL1.y);
-      ctx.lineTo(netR1.x, netR1.y);
-      ctx.strokeStyle = "#f1f5f9";
-      ctx.stroke();
-
-      drawAvatar(state.cpu, "cpu", "#f97316", "#fdba74");
-      drawAvatar(state.player, "player", "#10b981", "#6ee7b7");
-
-      const s = project(b.x, b.z, 0);
-      const p = project(b.x, b.z, b.y);
-      const shadow = 13 * s.p + 4;
-      const r = Math.max(5, b.radius * 420 * p.p);
-
-      ctx.fillStyle = "rgba(0,15,35,0.28)";
-      ctx.beginPath();
-      ctx.ellipse(s.x, s.y + 2, shadow, shadow * 0.55, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = "rgba(255,255,255,0.22)";
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, r + 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#fff";
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = "rgba(7,22,35,0.45)";
-      ctx.fillRect(24, 18, 165, 52);
-      ctx.fillRect(VIEW_W - 189, 18, 165, 52);
-      ctx.fillStyle = "#f8fafc";
-      ctx.font = '700 32px "Trebuchet MS", sans-serif';
-      ctx.textAlign = "center";
-      ctx.fillText(String(state.playerScore), 106, 54);
-      ctx.fillText(String(state.cpuScore), VIEW_W - 106, 54);
-
-      ctx.textAlign = "left";
-      ctx.fillStyle = "rgba(255,255,255,0.2)";
-      ctx.fillRect(30, VIEW_H - 26, 176, 8);
-      ctx.fillStyle = "#22d3ee";
-      ctx.fillRect(30, VIEW_H - 26, 176 * clamp(control.swing, 0, 1), 8);
-
-      if (!connectedRef.current) {
-        ctx.fillStyle = "rgba(2,10,22,0.72)";
-        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
-        ctx.fillStyle = "#e2e8f0";
-        ctx.textAlign = "center";
-        ctx.font = '700 34px "Trebuchet MS", sans-serif';
-        ctx.fillText("Connect phone controller", VIEW_W / 2, VIEW_H / 2 - 12);
-        ctx.font = '500 18px "Trebuchet MS", sans-serif';
-        ctx.fillStyle = "#94a3b8";
-        ctx.fillText("Swing to hit. Roll the phone to aim.", VIEW_W / 2, VIEW_H / 2 + 22);
-      } else if (state.winner) {
-        ctx.fillStyle = "rgba(2,10,22,0.72)";
-        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
-        ctx.textAlign = "center";
-        ctx.fillStyle = state.winner === "player" ? "#34d399" : "#fb7185";
-        ctx.font = '700 42px "Trebuchet MS", sans-serif';
-        ctx.fillText(state.winner === "player" ? "You win the match" : "CPU wins the match", VIEW_W / 2, VIEW_H / 2 - 6);
-        ctx.fillStyle = "#cbd5e1";
-        ctx.font = '500 18px "Trebuchet MS", sans-serif';
-        ctx.fillText("Press Reset Match to replay", VIEW_W / 2, VIEW_H / 2 + 30);
-      } else if (state.lastHitter === null && state.server === "player") {
-        ctx.fillStyle = "rgba(2,10,22,0.46)";
-        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
-        ctx.textAlign = "center";
-        ctx.fillStyle = "#e2e8f0";
-        ctx.font = '700 30px "Trebuchet MS", sans-serif';
-        ctx.fillText("Swing to serve", VIEW_W / 2, VIEW_H / 2 - 8);
-        ctx.fillStyle = "#94a3b8";
-        ctx.font = '500 17px "Trebuchet MS", sans-serif';
-        ctx.fillText("Wii-style: timing + wrist angle shape the shot", VIEW_W / 2, VIEW_H / 2 + 22);
-      }
-
-      ctx.restore();
-
-      if (nowMs - lastHud > 110) {
-        lastHud = nowMs;
+      if (now - lastHudCommit > 110) {
+        lastHudCommit = now;
         syncHud();
       }
 
-      raf = window.requestAnimationFrame(frame);
+      raf = window.requestAnimationFrame(animate);
     };
 
     resize();
     syncHud();
-    window.addEventListener("resize", resize);
-    raf = window.requestAnimationFrame(frame);
+    raf = window.requestAnimationFrame(animate);
 
     return () => {
       window.removeEventListener("resize", resize);
       window.cancelAnimationFrame(raf);
+
+      scene.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          obj.geometry.dispose();
+          if (Array.isArray(obj.material)) {
+            obj.material.forEach((mat) => mat.dispose());
+          } else {
+            obj.material.dispose();
+          }
+        }
+      });
+      lineMaterial.dispose();
+      renderer.dispose();
+
+      if (mount.contains(renderer.domElement)) {
+        mount.removeChild(renderer.domElement);
+      }
     };
   }, [role]);
 
   const requestPermission = async () => {
     try {
-      const motionCtor = (window as Window & { DeviceMotionEvent?: PermissionRequestCapable }).DeviceMotionEvent;
-      const orientationCtor = (window as Window & { DeviceOrientationEvent?: PermissionRequestCapable }).DeviceOrientationEvent;
-      const reqs: Array<Promise<"granted" | "denied">> = [];
+      const motionCtor = (
+        window as Window & { DeviceMotionEvent?: PermissionRequestCapable }
+      ).DeviceMotionEvent;
+      const orientationCtor = (
+        window as Window & { DeviceOrientationEvent?: PermissionRequestCapable }
+      ).DeviceOrientationEvent;
 
-      if (motionCtor?.requestPermission) reqs.push(motionCtor.requestPermission());
-      if (orientationCtor?.requestPermission) reqs.push(orientationCtor.requestPermission());
+      const requests: Array<Promise<"granted" | "denied">> = [];
+      if (motionCtor?.requestPermission) {
+        requests.push(motionCtor.requestPermission());
+      }
+      if (orientationCtor?.requestPermission) {
+        requests.push(orientationCtor.requestPermission());
+      }
 
-      if (reqs.length === 0) {
+      if (requests.length === 0) {
         setPermission("granted");
         return;
       }
 
-      const results = await Promise.all(reqs);
-      setPermission(results.every((r) => r === "granted") ? "granted" : "denied");
+      const results = await Promise.all(requests);
+      setPermission(results.every((result) => result === "granted") ? "granted" : "denied");
     } catch {
       setPermission("denied");
     }
@@ -909,15 +1146,21 @@ export default function Home() {
     try {
       await navigator.clipboard.writeText(phoneUrl);
     } catch {
-      // Ignore clipboard errors.
+      // Clipboard can fail in some contexts.
     }
   };
 
   const resetMatch = () => {
-    gameRef.current = createGame();
-    controlRef.current.pending = null;
-    controlRef.current.swing = 0;
-    setGameHud({ player: 0, cpu: 0, rally: 0, winner: null, status: "Swing your phone to serve" });
+    simRef.current = createSimState();
+    controlRef.current.pendingSwing = null;
+    controlRef.current.swingMeter = 0;
+    setGameHud({
+      player: 0,
+      cpu: 0,
+      rally: 0,
+      winner: null,
+      status: "Swing your phone to serve",
+    });
     setControlHud((prev) => ({ ...prev, swing: 0 }));
   };
 
@@ -926,9 +1169,9 @@ export default function Home() {
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 py-10">
         <header className="flex flex-col gap-2">
           <p className="text-xs uppercase tracking-[0.28em] text-cyan-300/70">Pocket Racket</p>
-          <h1 className="text-3xl font-semibold">Wii-Style Phone Tennis</h1>
+          <h1 className="text-3xl font-semibold">3D Wii-Style Phone Tennis</h1>
           <p className="text-sm text-slate-300/85">
-            The phone acts like a Wii Remote: swing to hit, wrist angle controls shot direction.
+            Real 3D court, Wii-like swing timing, and phone wrist angle for shot direction.
           </p>
         </header>
 
@@ -936,12 +1179,19 @@ export default function Home() {
           <section className="rounded-2xl border border-slate-800 bg-slate-900/65 p-6">
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
-                <p className="text-sm text-slate-400">Role: <span className="text-slate-100">{role === "host" ? "Host" : "Phone"}</span></p>
-                <p className="text-sm text-slate-400">Session: <span className="text-slate-100">{session || "..."}</span></p>
+                <p className="text-sm text-slate-400">
+                  Role: <span className="text-slate-100">{role === "host" ? "Host" : "Phone"}</span>
+                </p>
+                <p className="text-sm text-slate-400">
+                  Session: <span className="text-slate-100">{session || "..."}</span>
+                </p>
               </div>
+
               {role === "host" && (
                 <div className="flex items-center gap-2 rounded-full border border-slate-700/80 px-3 py-1 text-xs">
-                  <span className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-slate-500"}`} />
+                  <span
+                    className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-slate-500"}`}
+                  />
                   {connected ? "Phone connected" : "Waiting for phone"}
                 </div>
               )}
@@ -953,23 +1203,51 @@ export default function Home() {
                   <div className="h-36 w-36 rounded-xl bg-slate-800 p-2">
                     {qrDataUrl ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={qrDataUrl} alt="Session QR" className="h-full w-full rounded-lg bg-white p-2" />
+                      <img
+                        src={qrDataUrl}
+                        alt="Session QR"
+                        className="h-full w-full rounded-lg bg-white p-2"
+                      />
                     ) : (
-                      <div className="flex h-full w-full items-center justify-center text-xs text-slate-400">Generating QR...</div>
+                      <div className="flex h-full w-full items-center justify-center text-xs text-slate-400">
+                        Generating QR...
+                      </div>
                     )}
                   </div>
 
                   <div className="flex min-w-0 flex-1 flex-col gap-2 text-sm">
-                    <div className="rounded-lg bg-slate-800/70 p-2 break-all text-slate-200">{phoneUrl || "Preparing phone link..."}</div>
+                    <div className="rounded-lg bg-slate-800/70 p-2 break-all text-slate-200">
+                      {phoneUrl || "Preparing phone link..."}
+                    </div>
                     <div className="flex flex-wrap gap-2">
-                      <button onClick={copyPhoneLink} disabled={!phoneUrl} className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 enabled:hover:bg-slate-800 disabled:opacity-40">Copy Link</button>
-                      <button onClick={() => window.open(phoneUrl, "_blank")} disabled={!phoneUrl} className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 enabled:hover:bg-slate-800 disabled:opacity-40">Open Phone View</button>
-                      <button onClick={resetMatch} className="rounded-lg border border-cyan-600/70 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/20">Reset Match</button>
+                      <button
+                        onClick={copyPhoneLink}
+                        disabled={!phoneUrl}
+                        className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 enabled:hover:bg-slate-800 disabled:opacity-40"
+                      >
+                        Copy Link
+                      </button>
+                      <button
+                        onClick={() => window.open(phoneUrl, "_blank")}
+                        disabled={!phoneUrl}
+                        className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 enabled:hover:bg-slate-800 disabled:opacity-40"
+                      >
+                        Open Phone View
+                      </button>
+                      <button
+                        onClick={resetMatch}
+                        className="rounded-lg border border-cyan-600/70 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                      >
+                        Reset Match
+                      </button>
                     </div>
                   </div>
                 </div>
 
-                <canvas ref={canvasRef} className="aspect-[16/9] w-full rounded-xl border border-slate-800 bg-slate-950" />
+                <div
+                  ref={renderMountRef}
+                  className="aspect-[16/9] w-full overflow-hidden rounded-xl border border-slate-800 bg-slate-950"
+                />
 
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
@@ -986,56 +1264,88 @@ export default function Home() {
                   </div>
                   <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
                     <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Controller</p>
-                    <p className="mt-1 text-sm text-slate-200">Roll {controlHud.roll.toFixed(2)} | Pitch {controlHud.pitch.toFixed(2)}</p>
+                    <p className="mt-1 text-sm text-slate-200">
+                      Roll {controlHud.roll.toFixed(2)} | Pitch {controlHud.pitch.toFixed(2)}
+                    </p>
                     <p className="text-xs text-slate-400">Swing {controlHud.swing.toFixed(2)}</p>
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-sm text-slate-300">{gameHud.status}</div>
+                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-sm text-slate-300">
+                  {gameHud.status}
+                </div>
 
                 {gameHud.winner && (
-                  <div className={`rounded-xl border p-3 text-sm ${gameHud.winner === "player" ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200" : "border-rose-500/40 bg-rose-500/10 text-rose-200"}`}>
-                    {gameHud.winner === "player" ? "Match won. Wii-style timing looks good." : "CPU won this match. Try faster forward swings."}
+                  <div
+                    className={`rounded-xl border p-3 text-sm ${
+                      gameHud.winner === "player"
+                        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                        : "border-rose-500/40 bg-rose-500/10 text-rose-200"
+                    }`}
+                  >
+                    {gameHud.winner === "player"
+                      ? "Match won. Timing and angle control worked."
+                      : "CPU won this match. Try faster forward swings and earlier timing."}
                   </div>
                 )}
               </div>
             ) : (
               <div className="mt-4 space-y-4 text-sm text-slate-200">
-                <p>Hold phone like a Wii Remote. Keep this page open while you swing to control your racket.</p>
+                <p>
+                  Hold your phone like a Wii Remote. Swing forward to hit and rotate your wrist to direct the ball.
+                </p>
 
                 <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
                   <div className="flex items-center justify-between">
                     <span>Sensor permission</span>
                     <span className="text-xs text-slate-400">{permission}</span>
                   </div>
-                  <button onClick={requestPermission} className="mt-3 w-full rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800">Enable Motion Access</button>
-                  {!sensorAvailable && <p className="mt-3 text-xs text-rose-300">This browser/device does not expose motion sensors.</p>}
+                  <button
+                    onClick={requestPermission}
+                    className="mt-3 w-full rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800"
+                  >
+                    Enable Motion Access
+                  </button>
+                  {!sensorAvailable && (
+                    <p className="mt-3 text-xs text-rose-300">
+                      This browser/device does not expose motion sensors.
+                    </p>
+                  )}
                 </div>
 
                 <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
                   <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Live telemetry</p>
-                  <p className="mt-2 text-sm text-slate-300">Roll {phoneTelemetry.roll.toFixed(2)} | Pitch {phoneTelemetry.pitch.toFixed(2)}</p>
+                  <p className="mt-2 text-sm text-slate-300">
+                    Roll {phoneTelemetry.roll.toFixed(2)} | Pitch {phoneTelemetry.pitch.toFixed(2)}
+                  </p>
                   <p className="mt-1 text-sm text-slate-300">Swing {phoneTelemetry.swing.toFixed(2)}</p>
                   <p className="mt-1 text-xs text-slate-400">Packets sent: {phoneTelemetry.packets}</p>
                   <div className="mt-3 h-2 overflow-hidden rounded bg-slate-800">
-                    <div className="h-full bg-cyan-400 transition-all" style={{ width: `${clamp(phoneTelemetry.swing, 0, 1) * 100}%` }} />
+                    <div
+                      className="h-full bg-cyan-400 transition-all"
+                      style={{ width: `${clamp(phoneTelemetry.swing, 0, 1) * 100}%` }}
+                    />
                   </div>
                 </div>
 
-                <p className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-xs text-slate-400">Fast forward swing = power. Wrist roll adds cross-court direction.</p>
+                <p className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-xs text-slate-400">
+                  Forward acceleration sets power. Wrist roll creates cross-court shots.
+                </p>
               </div>
             )}
           </section>
 
           <section className="rounded-2xl border border-slate-800 bg-slate-900/65 p-6">
-            <h2 className="text-lg font-semibold">Wii-Style Flow</h2>
+            <h2 className="text-lg font-semibold">3D Wii-Style Flow</h2>
             <ol className="mt-3 list-decimal space-y-2 pl-4 text-sm text-slate-300">
-              <li>Run the host view on your PC.</li>
-              <li>Scan the QR code on your phone.</li>
+              <li>Run host on PC and scan the QR code with your phone.</li>
               <li>Enable motion sensors on phone.</li>
-              <li>Swing the phone to serve and return shots.</li>
+              <li>Swing to serve, then keep timing your swings for returns.</li>
+              <li>Roll/pitch your wrist during swing to shape shot direction and lift.</li>
             </ol>
-            <p className="mt-4 text-xs text-slate-500">No manual player movement needed. Timing + swing angle drive your shots, similar to Wii Sports tennis.</p>
+            <p className="mt-4 text-xs text-slate-500">
+              This is now true 3D rendering and physics (Three.js), not a flat 2D paddle board.
+            </p>
           </section>
         </div>
       </div>
