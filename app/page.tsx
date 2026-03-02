@@ -48,6 +48,8 @@ type SwingPacket = {
   at: number;
 };
 
+type SwingAxis = "alpha" | "beta" | "gamma";
+
 type ControlState = {
   roll: number;
   pitch: number;
@@ -59,6 +61,13 @@ type ControlState = {
   neutralRoll: number;
   neutralPitch: number;
   lastAccelMag: number;
+  swingPrimed: boolean;
+  swingPrimeAxis: SwingAxis | null;
+  swingPrimeSign: number;
+  swingPrimedAt: number;
+  swingForwardRate: number;
+  swingSideRate: number;
+  swingLiftRate: number;
 };
 
 type AvatarSim = {
@@ -131,6 +140,9 @@ const SWING_DURATION = 0.32;
 const SWING_COOLDOWN = 0.16;
 const SWING_TRIGGER = 0.5;
 const SWING_REARM_MS = 250;
+const SWING_PRIME_RATE = 82;
+const SWING_RELEASE_RATE = 128;
+const SWING_PRIME_TIMEOUT_MS = 850;
 const ROLL_RANGE_DEG = 34;
 const PITCH_RANGE_DEG = 46;
 const ORIENTATION_SMOOTHING = 0.34;
@@ -169,33 +181,54 @@ function getRawPitch(sample: MotionSample | null): number | null {
   return typeof beta === "number" ? beta : null;
 }
 
-function getSwing(sample: MotionSample | null, previousAccelMagnitude = 9.8): {
+function analyzeSwing(sample: MotionSample | null, previousAccelMagnitude = 9.8): {
   strength: number;
   accelMagnitude: number;
+  accelBurst: number;
+  rotationBurst: number;
+  primaryAxis: SwingAxis;
+  primaryRate: number;
+  sideRate: number;
+  liftRate: number;
 } {
   const rate = sample?.rotationRate;
   const gravity = sample?.accelerationIncludingGravity;
 
-  const alpha = rate?.alpha ?? 0;
-  const beta = rate?.beta ?? 0;
-  const gamma = rate?.gamma ?? 0;
+  const alpha = typeof rate?.alpha === "number" && Number.isFinite(rate.alpha) ? rate.alpha : 0;
+  const beta = typeof rate?.beta === "number" && Number.isFinite(rate.beta) ? rate.beta : 0;
+  const gamma = typeof rate?.gamma === "number" && Number.isFinite(rate.gamma) ? rate.gamma : 0;
   const gyroMagnitude = Math.sqrt(alpha ** 2 + beta ** 2 + gamma ** 2);
-  const gyroSwing = clamp((gyroMagnitude - 38) / 235, 0, 1);
+  const rotationBurst = clamp((gyroMagnitude - 30) / 250, 0, 1);
 
-  const gx = gravity?.x ?? 0;
-  const gy = gravity?.y ?? 0;
-  const gz = gravity?.z ?? 0;
+  const axes: Array<{ axis: SwingAxis; value: number }> = [
+    { axis: "alpha", value: alpha },
+    { axis: "beta", value: beta },
+    { axis: "gamma", value: gamma },
+  ];
+  axes.sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
+  const primaryAxis = axes[0]?.axis ?? "beta";
+  const primaryRate = axes[0]?.value ?? 0;
+
+  const gx = typeof gravity?.x === "number" && Number.isFinite(gravity.x) ? gravity.x : 0;
+  const gy = typeof gravity?.y === "number" && Number.isFinite(gravity.y) ? gravity.y : 0;
+  const gz = typeof gravity?.z === "number" && Number.isFinite(gravity.z) ? gravity.z : 0;
   const gravityMagnitude = Math.sqrt(gx ** 2 + gy ** 2 + gz ** 2);
   const jerk = Math.abs(gravityMagnitude - previousAccelMagnitude);
-  const accelSwing = clamp((jerk - 0.65) / 5.5, 0, 1);
+  const accelBurst = clamp((jerk - 0.55) / 4.9, 0, 1);
 
   return {
-    strength: Math.max(gyroSwing, accelSwing),
+    strength: clamp(rotationBurst * 0.72 + accelBurst * 0.46, 0, 1),
     accelMagnitude: gravityMagnitude,
+    accelBurst,
+    rotationBurst,
+    primaryAxis,
+    primaryRate,
+    sideRate: gamma,
+    liftRate: -beta,
   };
 }
 
-function updateControlFromSample(control: ControlState, sample: MotionSample | null) {
+function updateControlFromSample(control: ControlState, sample: MotionSample | null, sampleTime: number) {
   const rawRoll = getRawRoll(sample);
   const rawPitch = getRawPitch(sample);
 
@@ -220,9 +253,69 @@ function updateControlFromSample(control: ControlState, sample: MotionSample | n
     control.pitch = THREE.MathUtils.lerp(control.pitch, normalizedPitch, ORIENTATION_SMOOTHING);
   }
 
-  const swing = getSwing(sample, control.lastAccelMag);
+  const swing = analyzeSwing(sample, control.lastAccelMag);
   control.lastAccelMag = THREE.MathUtils.lerp(control.lastAccelMag, swing.accelMagnitude, 0.35);
-  control.swingMeter = Math.max(control.swingMeter * 0.6, swing.strength);
+  control.swingForwardRate = THREE.MathUtils.lerp(control.swingForwardRate, Math.abs(swing.primaryRate), 0.18);
+  control.swingSideRate = THREE.MathUtils.lerp(control.swingSideRate, swing.sideRate, 0.24);
+  control.swingLiftRate = THREE.MathUtils.lerp(control.swingLiftRate, swing.liftRate, 0.24);
+
+  if (control.swingPrimed && sampleTime - control.swingPrimedAt > SWING_PRIME_TIMEOUT_MS) {
+    control.swingPrimed = false;
+    control.swingPrimeAxis = null;
+    control.swingPrimeSign = 0;
+  }
+
+  const primaryAbs = Math.abs(swing.primaryRate);
+  const primarySign = Math.sign(swing.primaryRate || 0);
+
+  if (!control.swingPrimed) {
+    const directFlick =
+      primaryAbs > SWING_RELEASE_RATE * 1.18 &&
+      swing.rotationBurst > 0.74 &&
+      swing.accelBurst > 0.42;
+    if (directFlick) {
+      control.swingMeter = Math.max(control.swingMeter * 0.42, swing.strength * 0.95);
+      control.swingForwardRate = primaryAbs;
+      control.swingSideRate = swing.sideRate;
+      control.swingLiftRate = swing.liftRate;
+      return;
+    }
+
+    if (primaryAbs > SWING_PRIME_RATE) {
+      control.swingPrimed = true;
+      control.swingPrimeAxis = swing.primaryAxis;
+      control.swingPrimeSign = primarySign === 0 ? 1 : primarySign;
+      control.swingPrimedAt = sampleTime;
+    }
+    control.swingMeter = Math.max(control.swingMeter * 0.8, swing.strength * 0.42);
+    return;
+  }
+
+  const sameAxis = swing.primaryAxis === control.swingPrimeAxis;
+  const reversed = primarySign !== 0 && primarySign === -control.swingPrimeSign;
+  const releaseReady =
+    primaryAbs > SWING_RELEASE_RATE &&
+    (sameAxis || swing.accelBurst > 0.58) &&
+    (reversed || swing.accelBurst > 0.66);
+
+  if (releaseReady) {
+    const rateBonus = clamp((primaryAbs - SWING_RELEASE_RATE) / 220, 0, 0.34);
+    const releaseStrength = clamp(
+      swing.rotationBurst * 0.68 + swing.accelBurst * 0.36 + rateBonus,
+      0,
+      1,
+    );
+    control.swingMeter = Math.max(control.swingMeter * 0.35, releaseStrength);
+    control.swingForwardRate = primaryAbs;
+    control.swingSideRate = swing.sideRate;
+    control.swingLiftRate = swing.liftRate;
+    control.swingPrimed = false;
+    control.swingPrimeAxis = null;
+    control.swingPrimeSign = 0;
+    return;
+  }
+
+  control.swingMeter = Math.max(control.swingMeter * 0.86, swing.strength * 0.55);
 }
 
 function opponent(owner: ScoreOwner): ScoreOwner {
@@ -464,6 +557,13 @@ export default function Home() {
     neutralRoll: 0,
     neutralPitch: 0,
     lastAccelMag: 9.8,
+    swingPrimed: false,
+    swingPrimeAxis: null,
+    swingPrimeSign: 0,
+    swingPrimedAt: 0,
+    swingForwardRate: 0,
+    swingSideRate: 0,
+    swingLiftRate: 0,
   });
   const connectedRef = useRef(false);
   const simRef = useRef<SimState>(createSimState());
@@ -547,17 +647,25 @@ export default function Home() {
     if (latest.seq === control.lastSeq) return;
     control.lastSeq = latest.seq;
 
-    updateControlFromSample(control, latest.sample);
+    updateControlFromSample(control, latest.sample, latest.t);
     setNeutralReady(control.neutralReady);
 
     if (control.swingMeter > SWING_TRIGGER && latest.t - control.lastSwingAt > SWING_REARM_MS) {
+      const dynamicRoll = clamp(control.roll * 0.7 + control.swingSideRate / 210, -1, 1);
+      const dynamicPitch = clamp(control.pitch * 0.64 + control.swingLiftRate / 230, -1, 1);
+      const dynamicStrength = clamp(
+        control.swingMeter * 1.05 + clamp((control.swingForwardRate - 120) / 380, 0, 0.32),
+        0.2,
+        1,
+      );
       control.pendingSwing = {
-        strength: clamp(control.swingMeter * 1.16, 0.2, 1),
-        roll: control.roll,
-        pitch: control.pitch,
+        strength: dynamicStrength,
+        roll: dynamicRoll,
+        pitch: dynamicPitch,
         at: latest.t,
       };
       control.lastSwingAt = latest.t;
+      control.swingForwardRate = 0;
     }
   }, [latest]);
 
@@ -599,7 +707,7 @@ export default function Home() {
       const sample = latestRef.current;
       const roll = getRawRoll(sample);
       const pitch = getRawPitch(sample);
-      const swing = getSwing(sample, previewAccelMag);
+      const swing = analyzeSwing(sample, previewAccelMag);
       previewAccelMag = swing.accelMagnitude;
 
       setPhoneTelemetry((prev) => ({
@@ -700,6 +808,13 @@ export default function Home() {
       neutralRoll: 0,
       neutralPitch: 0,
       lastAccelMag: 9.8,
+      swingPrimed: false,
+      swingPrimeAxis: null,
+      swingPrimeSign: 0,
+      swingPrimedAt: 0,
+      swingForwardRate: 0,
+      swingSideRate: 0,
+      swingLiftRate: 0,
     };
     setGameHud({
       player: 0,
@@ -1248,6 +1363,12 @@ export default function Home() {
     simRef.current = createSimState();
     controlRef.current.pendingSwing = null;
     controlRef.current.swingMeter = 0;
+    controlRef.current.swingPrimed = false;
+    controlRef.current.swingPrimeAxis = null;
+    controlRef.current.swingPrimeSign = 0;
+    controlRef.current.swingForwardRate = 0;
+    controlRef.current.swingSideRate = 0;
+    controlRef.current.swingLiftRate = 0;
     setGameHud({
       player: 0,
       cpu: 0,
@@ -1275,6 +1396,12 @@ export default function Home() {
       control.neutralReady = true;
       control.roll = 0;
       control.pitch = 0;
+      control.swingPrimed = false;
+      control.swingPrimeAxis = null;
+      control.swingPrimeSign = 0;
+      control.swingForwardRate = 0;
+      control.swingSideRate = 0;
+      control.swingLiftRate = 0;
       setNeutralReady(true);
       setControlHud((prev) => ({ ...prev, roll: 0, pitch: 0 }));
       return true;
@@ -1546,7 +1673,7 @@ export default function Home() {
                 </div>
 
                 <p className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-xs text-slate-400">
-                  Forward acceleration sets power. Wrist roll creates cross-court shots.
+                  Use a backswing then a forward release. Wrist roll and lift shape cross-court, topspin, and slice.
                 </p>
               </div>
             )}
@@ -1557,8 +1684,8 @@ export default function Home() {
             <ol className="mt-3 list-decimal space-y-2 pl-4 text-sm text-slate-300">
               <li>Run host on PC and scan the QR code with your phone.</li>
               <li>Enable motion sensors on phone.</li>
-              <li>Swing to serve, then keep timing your swings for returns.</li>
-              <li>Roll/pitch your wrist during swing to shape shot direction and lift.</li>
+              <li>Use tennis-like backswing then release to trigger each shot.</li>
+              <li>Roll and lift your wrist through contact to shape direction and spin.</li>
             </ol>
             <p className="mt-4 text-xs text-slate-500">
               This is now true 3D rendering and physics (Three.js), not a flat 2D paddle board.
