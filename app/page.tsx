@@ -54,6 +54,10 @@ type ControlState = {
   pendingSwing: SwingPacket | null;
   lastSwingAt: number;
   lastSeq: number;
+  neutralReady: boolean;
+  neutralRoll: number;
+  neutralPitch: number;
+  lastAccelMag: number;
 };
 
 type AvatarSim = {
@@ -78,12 +82,15 @@ type MatchState = {
   lastHitter: ScoreOwner | null;
   expectedBounce: ScoreOwner | null;
   bounced: boolean;
+  serveInFlight: boolean;
   status: string;
 };
 
 type SimState = {
   ballPos: THREE.Vector3;
   ballVel: THREE.Vector3;
+  ballSpinSide: number;
+  ballSpinTop: number;
   player: AvatarSim;
   cpu: AvatarSim;
   match: MatchState;
@@ -100,28 +107,32 @@ type AvatarVisual = {
   racketMaterial: THREE.MeshStandardMaterial;
 };
 
-const COURT_HALF_WIDTH = 4;
-const COURT_HALF_LENGTH = 8;
-const BASELINE_PLAYER_Z = 6.3;
-const BASELINE_CPU_Z = -6.3;
+const COURT_HALF_WIDTH = 4.1;
+const COURT_HALF_LENGTH = 11.9;
+const BASELINE_PLAYER_Z = 9.6;
+const BASELINE_CPU_Z = -9.6;
+const SERVICE_LINE_Z = 6.4;
 const NET_Z = 0;
-const NET_HEIGHT = 1.1;
+const NET_HEIGHT = 1.0;
 
-const BALL_RADIUS = 0.18;
-const GRAVITY = 24;
-const GROUND_BOUNCE = 0.62;
-const AIR_DRAG = 0.04;
+const BALL_RADIUS = 0.14;
+const GRAVITY = 12.2;
+const GROUND_BOUNCE = 0.72;
+const AIR_DRAG = 0.014;
 
-const PLAYER_SPEED = 7.2;
-const CPU_SPEED = 6.4;
-const RACKET_REACH_X = 0.95;
+const PLAYER_SPEED = 8.3;
+const CPU_SPEED = 7.4;
+const RACKET_REACH_X = 1.05;
 const HIT_Y_MIN = 0.35;
-const HIT_Y_MAX = 2.9;
+const HIT_Y_MAX = 2.8;
 
 const SWING_DURATION = 0.32;
 const SWING_COOLDOWN = 0.16;
 const SWING_TRIGGER = 0.5;
 const SWING_REARM_MS = 250;
+const ROLL_RANGE_DEG = 34;
+const PITCH_RANGE_DEG = 46;
+const ORIENTATION_SMOOTHING = 0.34;
 
 const CONNECTION_TIMEOUT_MS = 1200;
 const POINTS_TO_WIN = 7;
@@ -147,17 +158,20 @@ function blankSample(): MotionSample {
   };
 }
 
-function getRoll(sample: MotionSample | null): number | null {
+function getRawRoll(sample: MotionSample | null): number | null {
   const gamma = sample?.orientation?.gamma;
-  return typeof gamma === "number" ? clamp(gamma / 48, -1, 1) : null;
+  return typeof gamma === "number" ? gamma : null;
 }
 
-function getPitch(sample: MotionSample | null): number | null {
+function getRawPitch(sample: MotionSample | null): number | null {
   const beta = sample?.orientation?.beta;
-  return typeof beta === "number" ? clamp((beta - 20) / 65, -1, 1) : null;
+  return typeof beta === "number" ? beta : null;
 }
 
-function getSwing(sample: MotionSample | null): number {
+function getSwing(sample: MotionSample | null, previousAccelMagnitude = 9.8): {
+  strength: number;
+  accelMagnitude: number;
+} {
   const rate = sample?.rotationRate;
   const gravity = sample?.accelerationIncludingGravity;
 
@@ -165,15 +179,49 @@ function getSwing(sample: MotionSample | null): number {
   const beta = rate?.beta ?? 0;
   const gamma = rate?.gamma ?? 0;
   const gyroMagnitude = Math.sqrt(alpha ** 2 + beta ** 2 + gamma ** 2);
-  const gyroSwing = clamp((gyroMagnitude - 62) / 315, 0, 1);
+  const gyroSwing = clamp((gyroMagnitude - 38) / 235, 0, 1);
 
   const gx = gravity?.x ?? 0;
   const gy = gravity?.y ?? 0;
   const gz = gravity?.z ?? 0;
   const gravityMagnitude = Math.sqrt(gx ** 2 + gy ** 2 + gz ** 2);
-  const accelSwing = clamp((Math.abs(gravityMagnitude - 9.8) - 1) / 9, 0, 1);
+  const jerk = Math.abs(gravityMagnitude - previousAccelMagnitude);
+  const accelSwing = clamp((jerk - 0.65) / 5.5, 0, 1);
 
-  return Math.max(gyroSwing, accelSwing);
+  return {
+    strength: Math.max(gyroSwing, accelSwing),
+    accelMagnitude: gravityMagnitude,
+  };
+}
+
+function updateControlFromSample(control: ControlState, sample: MotionSample | null) {
+  const rawRoll = getRawRoll(sample);
+  const rawPitch = getRawPitch(sample);
+
+  if (
+    rawRoll !== null &&
+    rawPitch !== null &&
+    (Number.isNaN(rawRoll) || Number.isNaN(rawPitch) || !Number.isFinite(rawRoll) || !Number.isFinite(rawPitch))
+  ) {
+    return;
+  }
+
+  if (!control.neutralReady && rawRoll !== null && rawPitch !== null) {
+    control.neutralReady = true;
+    control.neutralRoll = rawRoll;
+    control.neutralPitch = rawPitch;
+  }
+
+  if (control.neutralReady && rawRoll !== null && rawPitch !== null) {
+    const normalizedRoll = clamp((rawRoll - control.neutralRoll) / ROLL_RANGE_DEG, -1, 1);
+    const normalizedPitch = clamp((rawPitch - control.neutralPitch) / PITCH_RANGE_DEG, -1, 1);
+    control.roll = THREE.MathUtils.lerp(control.roll, normalizedRoll, ORIENTATION_SMOOTHING);
+    control.pitch = THREE.MathUtils.lerp(control.pitch, normalizedPitch, ORIENTATION_SMOOTHING);
+  }
+
+  const swing = getSwing(sample, control.lastAccelMag);
+  control.lastAccelMag = THREE.MathUtils.lerp(control.lastAccelMag, swing.accelMagnitude, 0.35);
+  control.swingMeter = Math.max(control.swingMeter * 0.6, swing.strength);
 }
 
 function opponent(owner: ScoreOwner): ScoreOwner {
@@ -200,12 +248,16 @@ function placeServeBall(sim: SimState, server: ScoreOwner) {
   sim.ballPos.z = server === "player" ? BASELINE_PLAYER_Z : BASELINE_CPU_Z;
   sim.ballPos.y = 1.45;
   sim.ballVel.set(0, 0, 0);
+  sim.ballSpinSide = 0;
+  sim.ballSpinTop = 0;
 }
 
 function createSimState(): SimState {
   const sim: SimState = {
     ballPos: new THREE.Vector3(0, 1.45, BASELINE_PLAYER_Z),
     ballVel: new THREE.Vector3(0, 0, 0),
+    ballSpinSide: 0,
+    ballSpinTop: 0,
     player: createAvatarState(),
     cpu: createAvatarState(),
     match: {
@@ -218,6 +270,7 @@ function createSimState(): SimState {
       lastHitter: null,
       expectedBounce: null,
       bounced: false,
+      serveInFlight: false,
       status: "Swing your phone to serve",
     },
   };
@@ -243,12 +296,18 @@ function strikeBall(
   pitch: number,
   isServe: boolean,
 ) {
-  const forward = (isServe ? 11 : 12) + power * 6;
+  const forward = (isServe ? 17.5 : 19.4) + power * 8.8;
   const toward = hitter === "player" ? -1 : 1;
-  const lateral = clamp(roll * 7 + (hitter === "cpu" ? (Math.random() - 0.5) * 1.8 : 0), -9, 9);
-  const lift = (isServe ? 8.2 : 7.2) + power * 3 + clamp(-pitch * 2.1, -1.2, 2);
+  const lateral = clamp(
+    roll * 6.7 + (hitter === "cpu" ? (Math.random() - 0.5) * 1.6 : 0),
+    -10.5,
+    10.5,
+  );
+  const lift = (isServe ? 6.1 : 5.4) + power * 2.7 + clamp(-pitch * 1.65, -1.2, 1.7);
 
   sim.ballVel.set(lateral, lift, toward * forward);
+  sim.ballSpinSide = roll * (4.2 + power * 5.5);
+  sim.ballSpinTop = clamp(-pitch * 5.6 + power * 2.2, -8.5, 10.5);
 
   if (isServe) {
     if (hitter === "player") {
@@ -263,6 +322,7 @@ function strikeBall(
   sim.match.lastHitter = hitter;
   sim.match.expectedBounce = opponent(hitter);
   sim.match.bounced = false;
+  sim.match.serveInFlight = isServe;
   sim.match.rally = Math.max(1, sim.match.rally + 1);
 }
 
@@ -270,8 +330,8 @@ function canPlayerHit(sim: SimState) {
   const ball = sim.ballPos;
   return (
     sim.ballVel.z > 0 &&
-    ball.z > 2.2 &&
-    ball.z < COURT_HALF_LENGTH &&
+    ball.z > 4.4 &&
+    ball.z < COURT_HALF_LENGTH + 0.8 &&
     Math.abs(ball.x - sim.player.x) <= RACKET_REACH_X &&
     ball.y >= HIT_Y_MIN &&
     ball.y <= HIT_Y_MAX
@@ -282,8 +342,8 @@ function canCpuHit(sim: SimState) {
   const ball = sim.ballPos;
   return (
     sim.ballVel.z < 0 &&
-    ball.z < -2.2 &&
-    ball.z > -COURT_HALF_LENGTH &&
+    ball.z < -4.4 &&
+    ball.z > -COURT_HALF_LENGTH - 0.8 &&
     Math.abs(ball.x - sim.cpu.x) <= RACKET_REACH_X &&
     ball.y >= HIT_Y_MIN &&
     ball.y <= HIT_Y_MAX
@@ -394,6 +454,10 @@ export default function Home() {
     pendingSwing: null,
     lastSwingAt: 0,
     lastSeq: -1,
+    neutralReady: false,
+    neutralRoll: 0,
+    neutralPitch: 0,
+    lastAccelMag: 9.8,
   });
   const connectedRef = useRef(false);
   const simRef = useRef<SimState>(createSimState());
@@ -477,21 +541,11 @@ export default function Home() {
     if (latest.seq === control.lastSeq) return;
     control.lastSeq = latest.seq;
 
-    const roll = getRoll(latest.sample);
-    const pitch = getPitch(latest.sample);
-    const swing = getSwing(latest.sample);
+    updateControlFromSample(control, latest.sample);
 
-    if (roll !== null) {
-      control.roll = roll;
-    }
-    if (pitch !== null) {
-      control.pitch = pitch;
-    }
-
-    control.swingMeter = Math.max(control.swingMeter * 0.58, swing);
-    if (swing > SWING_TRIGGER && latest.t - control.lastSwingAt > SWING_REARM_MS) {
+    if (control.swingMeter > SWING_TRIGGER && latest.t - control.lastSwingAt > SWING_REARM_MS) {
       control.pendingSwing = {
-        strength: clamp(swing * 1.18, 0.2, 1),
+        strength: clamp(control.swingMeter * 1.16, 0.2, 1),
         roll: control.roll,
         pitch: control.pitch,
         at: latest.t,
@@ -528,6 +582,7 @@ export default function Home() {
 
     let mounted = true;
     let lastPreview = 0;
+    let previewAccelMag = 9.8;
 
     const publishPreview = () => {
       const now = performance.now();
@@ -535,15 +590,16 @@ export default function Home() {
       lastPreview = now;
 
       const sample = latestRef.current;
-      const roll = getRoll(sample);
-      const pitch = getPitch(sample);
-      const swing = getSwing(sample);
+      const roll = getRawRoll(sample);
+      const pitch = getRawPitch(sample);
+      const swing = getSwing(sample, previewAccelMag);
+      previewAccelMag = swing.accelMagnitude;
 
       setPhoneTelemetry((prev) => ({
         ...prev,
-        roll: roll ?? prev.roll,
-        pitch: pitch ?? prev.pitch,
-        swing,
+        roll: roll == null ? prev.roll : clamp(roll / 45, -1, 1),
+        pitch: pitch == null ? prev.pitch : clamp((pitch - 20) / 65, -1, 1),
+        swing: swing.strength,
       }));
     };
 
@@ -633,6 +689,10 @@ export default function Home() {
       pendingSwing: null,
       lastSwingAt: 0,
       lastSeq: -1,
+      neutralReady: false,
+      neutralRoll: 0,
+      neutralPitch: 0,
+      lastAccelMag: 9.8,
     };
     setGameHud({
       player: 0,
@@ -651,16 +711,16 @@ export default function Home() {
     const mount = renderMountRef.current;
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#0c2138");
-    scene.fog = new THREE.Fog(0x0c2138, 18, 34);
+    scene.fog = new THREE.Fog(0x0c2138, 28, 58);
 
     const camera = new THREE.PerspectiveCamera(
-      52,
+      48,
       mount.clientWidth / Math.max(1, mount.clientHeight),
       0.1,
-      80,
+      120,
     );
-    camera.position.set(0, 7.4, 13.2);
-    camera.lookAt(0, 1.4, -0.8);
+    camera.position.set(0, 9.6, 22.2);
+    camera.lookAt(0, 1.35, -1.3);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -677,15 +737,15 @@ export default function Home() {
     dir.castShadow = true;
     dir.shadow.mapSize.set(1024, 1024);
     dir.shadow.camera.near = 1;
-    dir.shadow.camera.far = 32;
-    dir.shadow.camera.left = -12;
-    dir.shadow.camera.right = 12;
-    dir.shadow.camera.top = 12;
-    dir.shadow.camera.bottom = -12;
+    dir.shadow.camera.far = 52;
+    dir.shadow.camera.left = -16;
+    dir.shadow.camera.right = 16;
+    dir.shadow.camera.top = 18;
+    dir.shadow.camera.bottom = -18;
     scene.add(dir);
 
     const arena = new THREE.Mesh(
-      new THREE.PlaneGeometry(38, 34),
+      new THREE.PlaneGeometry(48, 58),
       new THREE.MeshStandardMaterial({
         color: 0x315572,
         roughness: 0.94,
@@ -722,9 +782,9 @@ export default function Home() {
     addLine(-COURT_HALF_WIDTH, -COURT_HALF_LENGTH, -COURT_HALF_WIDTH, COURT_HALF_LENGTH);
     addLine(COURT_HALF_WIDTH, -COURT_HALF_LENGTH, COURT_HALF_WIDTH, COURT_HALF_LENGTH);
     addLine(-COURT_HALF_WIDTH, NET_Z, COURT_HALF_WIDTH, NET_Z);
-    addLine(-COURT_HALF_WIDTH, -2.2, COURT_HALF_WIDTH, -2.2);
-    addLine(-COURT_HALF_WIDTH, 2.2, COURT_HALF_WIDTH, 2.2);
-    addLine(0, -2.2, 0, 2.2);
+    addLine(-COURT_HALF_WIDTH, -SERVICE_LINE_Z, COURT_HALF_WIDTH, -SERVICE_LINE_Z);
+    addLine(-COURT_HALF_WIDTH, SERVICE_LINE_Z, COURT_HALF_WIDTH, SERVICE_LINE_Z);
+    addLine(0, -SERVICE_LINE_Z, 0, SERVICE_LINE_Z);
     scene.add(lines);
 
     const net = new THREE.Mesh(
@@ -831,6 +891,7 @@ export default function Home() {
       match.lastHitter = null;
       match.expectedBounce = null;
       match.bounced = false;
+      match.serveInFlight = false;
 
       sim.player.swingT = 0;
       sim.player.used = false;
@@ -846,6 +907,8 @@ export default function Home() {
         match.status = winner === "player" ? "You won the match" : "CPU won the match";
         sim.ballPos.set(0, BALL_RADIUS, 0);
         sim.ballVel.set(0, 0, 0);
+        sim.ballSpinSide = 0;
+        sim.ballSpinTop = 0;
         syncHud();
         return;
       }
@@ -914,12 +977,12 @@ export default function Home() {
       } else {
         sim.player.targetX =
           sim.ballVel.z > 0 || sim.ballPos.z > NET_Z
-            ? clamp(sim.ballPos.x + sim.ballVel.x * 0.08, -playerLimit, playerLimit)
+            ? clamp(sim.ballPos.x + sim.ballVel.x * 0.14, -playerLimit, playerLimit)
             : clamp(sim.ballPos.x * 0.35, -1.2, 1.2);
 
         sim.cpu.targetX =
           sim.ballVel.z < 0 || sim.ballPos.z < NET_Z
-            ? clamp(sim.ballPos.x + sim.ballVel.x * 0.08, -cpuLimit, cpuLimit)
+            ? clamp(sim.ballPos.x + sim.ballVel.x * 0.14, -cpuLimit, cpuLimit)
             : clamp(sim.ballPos.x * 0.35, -1.2, 1.2);
       }
 
@@ -944,12 +1007,12 @@ export default function Home() {
           const serveZ = match.server === "player" ? BASELINE_PLAYER_Z : BASELINE_CPU_Z;
           sim.ballPos.x += (serverAvatar.x - sim.ballPos.x) * 0.22;
           sim.ballPos.z = serveZ;
-          sim.ballPos.y = 1.45 + Math.sin(now * 0.006) * 0.06;
+          sim.ballPos.y = 1.48 + Math.sin(now * 0.0065) * 0.08;
 
           if (match.server === "player") {
             if (match.serveTimer <= 0 && sim.player.swingT > 0 && !sim.player.used) {
               const progress = 1 - sim.player.swingT / SWING_DURATION;
-              if (progress > 0.2 && progress < 0.76) {
+              if (progress > 0.18 && progress < 0.8) {
                 strikeBall(sim, "player", sim.player.power, sim.player.roll, sim.player.pitch, true);
                 sim.player.used = true;
                 sim.player.flash = 0.11;
@@ -967,7 +1030,7 @@ export default function Home() {
             }
             if (sim.cpu.swingT > 0 && !sim.cpu.used) {
               const progress = 1 - sim.cpu.swingT / SWING_DURATION;
-              if (progress > 0.26 && progress < 0.74) {
+              if (progress > 0.24 && progress < 0.78) {
                 strikeBall(sim, "cpu", sim.cpu.power, sim.cpu.roll, sim.cpu.pitch, true);
                 sim.cpu.used = true;
                 sim.cpu.flash = 0.1;
@@ -981,11 +1044,16 @@ export default function Home() {
           sim.ballVel.y -= GRAVITY * dt;
           sim.ballVel.x *= 1 - AIR_DRAG * dt;
           sim.ballVel.z *= 1 - AIR_DRAG * dt;
+          sim.ballVel.x += sim.ballSpinSide * 0.14 * dt;
+          sim.ballVel.y -= Math.max(sim.ballSpinTop, 0) * 0.2 * dt;
+          sim.ballVel.z += -Math.sign(sim.ballVel.z || 1) * sim.ballSpinTop * 0.05 * dt;
+          sim.ballSpinSide *= 1 - Math.min(0.35 * dt, 0.25);
+          sim.ballSpinTop *= 1 - Math.min(0.4 * dt, 0.28);
           sim.ballPos.addScaledVector(sim.ballVel, dt);
 
           if (
             sim.ballVel.z < -0.45 &&
-            sim.ballPos.z < -2.1 &&
+            sim.ballPos.z < -4.2 &&
             sim.cpu.swingT <= 0 &&
             sim.cpu.cooldown <= 0
           ) {
@@ -1019,7 +1087,7 @@ export default function Home() {
               const dz = sim.ballPos.z - prevZ;
               const t = Math.abs(dz) < 1e-6 ? 0 : (NET_Z - prevZ) / dz;
               const yAtNet = prevY + (sim.ballPos.y - prevY) * t;
-              if (yAtNet < NET_HEIGHT) {
+              if (yAtNet < NET_HEIGHT + BALL_RADIUS * 0.65) {
                 awardPoint(opponent(match.lastHitter), "Into the net");
                 pointEnded = true;
               }
@@ -1042,10 +1110,25 @@ export default function Home() {
               awardPoint(match.lastHitter, "Second bounce");
               pointEnded = true;
             } else {
+              if (
+                match.serveInFlight &&
+                (Math.abs(sim.ballPos.z) > SERVICE_LINE_Z || Math.abs(sim.ballPos.x) > COURT_HALF_WIDTH)
+              ) {
+                awardPoint(opponent(match.lastHitter), "Service fault");
+                pointEnded = true;
+              }
+            }
+
+            if (!pointEnded && !match.bounced) {
               match.bounced = true;
-              sim.ballVel.y = Math.max(Math.abs(sim.ballVel.y) * GROUND_BOUNCE, 4.4);
-              sim.ballVel.x *= 0.93;
-              sim.ballVel.z *= 0.95;
+              if (match.serveInFlight) {
+                match.serveInFlight = false;
+              }
+              sim.ballVel.y = Math.max(Math.abs(sim.ballVel.y) * GROUND_BOUNCE, 3.8);
+              sim.ballVel.x = sim.ballVel.x * 0.9 + sim.ballSpinSide * 0.25;
+              sim.ballVel.z = sim.ballVel.z * 0.94 - Math.sign(sim.ballVel.z || 1) * sim.ballSpinTop * 0.14;
+              sim.ballSpinSide *= 0.58;
+              sim.ballSpinTop *= 0.42;
             }
           }
 
@@ -1072,8 +1155,8 @@ export default function Home() {
       const shadowScale = clamp(1.8 - sim.ballPos.y * 0.22, 0.55, 1.6);
       ballShadow.scale.set(shadowScale, shadowScale, shadowScale);
 
-      camera.position.x = THREE.MathUtils.lerp(camera.position.x, sim.ballPos.x * 0.16, 0.05);
-      camera.lookAt(sim.ballPos.x * 0.1, 1.3, -0.8);
+      camera.position.x = THREE.MathUtils.lerp(camera.position.x, sim.ballPos.x * 0.14, 0.05);
+      camera.lookAt(sim.ballPos.x * 0.08, 1.2, -1.6);
 
       renderer.render(scene, camera);
 
@@ -1164,6 +1247,21 @@ export default function Home() {
     setControlHud((prev) => ({ ...prev, swing: 0 }));
   };
 
+  const recenterController = () => {
+    const control = controlRef.current;
+    const sample = latest?.sample ?? null;
+    const roll = getRawRoll(sample);
+    const pitch = getRawPitch(sample);
+    if (roll !== null && pitch !== null) {
+      control.neutralRoll = roll;
+      control.neutralPitch = pitch;
+      control.neutralReady = true;
+      control.roll = 0;
+      control.pitch = 0;
+      setControlHud((prev) => ({ ...prev, roll: 0, pitch: 0 }));
+    }
+  };
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 py-10">
@@ -1239,6 +1337,12 @@ export default function Home() {
                         className="rounded-lg border border-cyan-600/70 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/20"
                       >
                         Reset Match
+                      </button>
+                      <button
+                        onClick={recenterController}
+                        className="rounded-lg border border-slate-600 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800"
+                      >
+                        Recenter Motion
                       </button>
                     </div>
                   </div>
