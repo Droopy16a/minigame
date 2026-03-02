@@ -40,6 +40,7 @@ type StoreEntry = {
 type PermissionState = "unknown" | "granted" | "denied";
 type ScoreOwner = "player" | "cpu";
 type HostPhase = "calibration" | "game";
+type BotLevel = "easy" | "medium" | "hard";
 
 type SwingPacket = {
   strength: number;
@@ -136,7 +137,6 @@ const GROUND_BOUNCE = 0.72;
 const AIR_DRAG = 0.014;
 
 const PLAYER_SPEED = 8.3;
-const CPU_SPEED = 7.4;
 const RACKET_REACH_X = 1.05;
 const HIT_Y_MIN = 0.35;
 const HIT_Y_MAX = 2.8;
@@ -155,6 +155,55 @@ const ORIENTATION_SMOOTHING = 0.34;
 
 const CONNECTION_TIMEOUT_MS = 1200;
 const POINTS_TO_WIN = 7;
+
+const BOT_LEVELS: Record<
+  BotLevel,
+  {
+    label: string;
+    moveSpeed: number;
+    reactionZ: number;
+    reactionVel: number;
+    aimNoise: number;
+    powerMin: number;
+    powerMax: number;
+    hitQuality: number;
+    anticipation: number;
+  }
+> = {
+  easy: {
+    label: "Easy",
+    moveSpeed: 5.9,
+    reactionZ: -6.1,
+    reactionVel: -0.76,
+    aimNoise: 0.58,
+    powerMin: 0.42,
+    powerMax: 0.76,
+    hitQuality: 0.76,
+    anticipation: 0.08,
+  },
+  medium: {
+    label: "Medium",
+    moveSpeed: 7.4,
+    reactionZ: -4.5,
+    reactionVel: -0.5,
+    aimNoise: 0.3,
+    powerMin: 0.5,
+    powerMax: 0.9,
+    hitQuality: 0.9,
+    anticipation: 0.14,
+  },
+  hard: {
+    label: "Hard",
+    moveSpeed: 9,
+    reactionZ: -3.7,
+    reactionVel: -0.34,
+    aimNoise: 0.14,
+    powerMin: 0.6,
+    powerMax: 0.98,
+    hitQuality: 0.98,
+    anticipation: 0.22,
+  },
+};
 
 function clamp(v: number, min: number, max: number) {
   return Math.min(max, Math.max(min, v));
@@ -569,6 +618,7 @@ export default function Home() {
   const [controlHud, setControlHud] = useState({ roll: 0, pitch: 0, swing: 0 });
   const [hostPhase, setHostPhase] = useState<HostPhase>("calibration");
   const [neutralReady, setNeutralReady] = useState(false);
+  const [botLevel, setBotLevel] = useState<BotLevel>("medium");
 
   const latestRef = useRef<MotionSample | null>(null);
   const sendingRef = useRef(false);
@@ -598,8 +648,13 @@ export default function Home() {
     swingLiftRate: 0,
   });
   const connectedRef = useRef(false);
+  const botLevelRef = useRef<BotLevel>("medium");
   const simRef = useRef<SimState>(createSimState());
   const renderMountRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    botLevelRef.current = botLevel;
+  }, [botLevel]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -1117,6 +1172,7 @@ export default function Home() {
 
       const match = sim.match;
       const control = controlRef.current;
+      const botProfile = BOT_LEVELS[botLevelRef.current];
 
       control.swingMeter = Math.max(0, control.swingMeter - dt * 1.3);
 
@@ -1146,12 +1202,16 @@ export default function Home() {
 
         sim.cpu.targetX =
           sim.ballVel.z < 0 || sim.ballPos.z < NET_Z
-            ? clamp(sim.ballPos.x + sim.ballVel.x * 0.14, -cpuLimit, cpuLimit)
+            ? clamp(
+                sim.ballPos.x + sim.ballVel.x * (0.1 + botProfile.anticipation),
+                -cpuLimit,
+                cpuLimit,
+              )
             : clamp(sim.ballPos.x * 0.35, -1.2, 1.2);
       }
 
       sim.player.x = approach(sim.player.x, sim.player.targetX, PLAYER_SPEED * dt);
-      sim.cpu.x = approach(sim.cpu.x, sim.cpu.targetX, CPU_SPEED * dt);
+      sim.cpu.x = approach(sim.cpu.x, sim.cpu.targetX, botProfile.moveSpeed * dt);
 
       for (const avatar of [sim.player, sim.cpu]) {
         avatar.cooldown = Math.max(0, avatar.cooldown - dt);
@@ -1187,9 +1247,9 @@ export default function Home() {
             if (match.serveTimer <= 0 && sim.cpu.swingT <= 0 && sim.cpu.cooldown <= 0) {
               startSwing(
                 sim.cpu,
-                0.55 + Math.random() * 0.35,
-                clamp((Math.random() - 0.5) * 0.9, -1, 1),
-                clamp((Math.random() - 0.15) * 0.7, -1, 1),
+                botProfile.powerMin + Math.random() * (botProfile.powerMax - botProfile.powerMin),
+                clamp((Math.random() - 0.5) * (0.6 + botProfile.aimNoise), -1, 1),
+                clamp((Math.random() - 0.3) * (0.46 + botProfile.aimNoise * 0.45), -1, 1),
               );
             }
             if (sim.cpu.swingT > 0 && !sim.cpu.used) {
@@ -1216,17 +1276,32 @@ export default function Home() {
           sim.ballPos.addScaledVector(sim.ballVel, dt);
 
           if (
-            sim.ballVel.z < -0.45 &&
-            sim.ballPos.z < -4.2 &&
+            sim.ballVel.z < botProfile.reactionVel &&
+            sim.ballPos.z < botProfile.reactionZ &&
             sim.cpu.swingT <= 0 &&
             sim.cpu.cooldown <= 0
           ) {
             const bias = clamp(0.9 - Math.abs(sim.ballPos.x - sim.cpu.x), 0, 0.9);
             startSwing(
               sim.cpu,
-              clamp(0.45 + bias * 0.3 + Math.random() * 0.25, 0.45, 0.95),
-              clamp((sim.ballPos.x - sim.cpu.x) * 0.65 + (Math.random() - 0.5) * 0.28, -1, 1),
-              clamp((Math.random() - 0.2) * 0.7, -1, 1),
+              clamp(
+                botProfile.powerMin +
+                  bias * 0.26 +
+                  Math.random() * (botProfile.powerMax - botProfile.powerMin),
+                botProfile.powerMin,
+                Math.min(1, botProfile.powerMax + 0.06),
+              ),
+              clamp(
+                (sim.ballPos.x - sim.cpu.x) * (0.5 + botProfile.anticipation * 0.8) +
+                  (Math.random() - 0.5) * botProfile.aimNoise,
+                -1,
+                1,
+              ),
+              clamp(
+                (Math.random() - 0.24) * (0.4 + botProfile.aimNoise * 0.55),
+                -1,
+                1,
+              ),
             );
           }
 
@@ -1237,9 +1312,11 @@ export default function Home() {
           }
 
           if (sim.cpu.swingT > 0 && !sim.cpu.used && canCpuHit(sim)) {
-            strikeBall(sim, "cpu", sim.cpu.power, sim.cpu.roll, sim.cpu.pitch, false);
+            if (Math.random() <= botProfile.hitQuality) {
+              strikeBall(sim, "cpu", sim.cpu.power, sim.cpu.roll, sim.cpu.pitch, false);
+              sim.cpu.flash = 0.12;
+            }
             sim.cpu.used = true;
-            sim.cpu.flash = 0.12;
           }
 
           if (match.lastHitter) {
@@ -1498,6 +1575,14 @@ export default function Home() {
     }));
   };
 
+  const setBotLevelAndNotify = (level: BotLevel) => {
+    setBotLevel(level);
+    setGameHud((prev) => ({
+      ...prev,
+      status: `Bot level set to ${BOT_LEVELS[level].label}.`,
+    }));
+  };
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 py-10">
@@ -1599,6 +1684,27 @@ export default function Home() {
                         </>
                       )}
                     </div>
+                    <div className="mt-1 rounded-lg border border-slate-800 bg-slate-950/70 p-2">
+                      <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Bot Level</p>
+                      <div className="mt-2 flex gap-2">
+                        {(Object.keys(BOT_LEVELS) as BotLevel[]).map((level) => {
+                          const active = botLevel === level;
+                          return (
+                            <button
+                              key={level}
+                              onClick={() => setBotLevelAndNotify(level)}
+                              className={`rounded-md border px-3 py-1 text-xs ${
+                                active
+                                  ? "border-cyan-500/80 bg-cyan-500/20 text-cyan-100"
+                                  : "border-slate-700 text-slate-200 hover:bg-slate-800"
+                              }`}
+                            >
+                              {BOT_LEVELS[level].label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -1656,6 +1762,7 @@ export default function Home() {
                       <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
                         <p className="text-xs uppercase tracking-[0.2em] text-slate-500">CPU</p>
                         <p className="mt-1 text-2xl font-semibold text-orange-300">{gameHud.cpu}</p>
+                        <p className="text-xs text-slate-400">{BOT_LEVELS[botLevel].label}</p>
                       </div>
                       <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
                         <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Rally</p>
