@@ -3,6 +3,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import * as THREE from "three";
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  Container,
+  Divider,
+  Grid,
+  LinearProgress,
+  Paper,
+  Stack,
+  Typography,
+} from "@mui/material";
+import { alpha, type Theme } from "@mui/material/styles";
 
 type OrientationSample = {
   alpha: number | null;
@@ -1583,258 +1597,486 @@ export default function Home() {
     }));
   };
 
+  const glassPanelSx = (theme: Theme) => ({
+    borderRadius: 4,
+    border: `1px solid ${alpha(theme.palette.common.white, 0.08)}`,
+    background: `linear-gradient(145deg, ${alpha(theme.palette.background.paper, 0.92)}, ${alpha("#0b1220", 0.78)})`,
+    boxShadow: `0 30px 70px ${alpha(theme.palette.common.black, 0.55)}`,
+    backdropFilter: "blur(10px)",
+  });
+
+  const insetCardSx = (theme: Theme) => ({
+    borderRadius: 3,
+    border: `1px solid ${alpha(theme.palette.common.white, 0.06)}`,
+    background: alpha(theme.palette.background.default, 0.6),
+  });
+
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 py-10">
-        <header className="flex flex-col gap-2">
-          <p className="text-xs uppercase tracking-[0.28em] text-cyan-300/70">Pocket Racket</p>
-          <h1 className="text-3xl font-semibold">3D Wii-Style Phone Tennis</h1>
-          <p className="text-sm text-slate-300/85">
-            First-person court view with phone-driven Wii-style tennis controls.
-          </p>
-        </header>
+    <Box
+      component="main"
+      sx={{
+        minHeight: "100vh",
+        position: "relative",
+        overflow: "hidden",
+        color: "text.primary",
+        background:
+          "radial-gradient(1200px circle at 12% -10%, rgba(34, 211, 238, 0.18), transparent 60%), radial-gradient(1000px circle at 90% 0%, rgba(251, 113, 133, 0.16), transparent 55%), linear-gradient(180deg, #070b12 0%, #0b0f17 50%, #0d1220 100%)",
+        "&:before": {
+          content: '""',
+          position: "absolute",
+          inset: 0,
+          backgroundImage:
+            "radial-gradient(circle at 15% 20%, rgba(148, 163, 184, 0.08), transparent 45%), radial-gradient(circle at 80% 35%, rgba(94, 234, 212, 0.08), transparent 50%)",
+          opacity: 0.9,
+          pointerEvents: "none",
+        },
+      }}
+    >
+      <Container maxWidth="lg" sx={{ position: "relative", py: { xs: 4, md: 6 } }}>
+        <Stack spacing={{ xs: 3, md: 4 }}>
+          <Stack spacing={1}>
+            <Typography
+              variant="overline"
+              sx={{ letterSpacing: "0.4em", color: "primary.light", opacity: 0.9 }}
+            >
+              Pocket Racket
+            </Typography>
+            <Typography variant="h3" sx={{ fontWeight: 650 }}>
+              3D Wii-Style Phone Tennis
+            </Typography>
+            <Typography variant="body1" color="text.secondary">
+              First-person court view with phone-driven Wii-style tennis controls.
+            </Typography>
+          </Stack>
 
-        <div className="grid gap-6 xl:grid-cols-[2fr,1fr]">
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/65 p-6">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <p className="text-sm text-slate-400">
-                  Role: <span className="text-slate-100">{role === "host" ? "Host" : "Phone"}</span>
-                </p>
-                <p className="text-sm text-slate-400">
-                  Session: <span className="text-slate-100">{session || "..."}</span>
-                </p>
-              </div>
-
-              {role === "host" && (
-                <div className="flex items-center gap-2 rounded-full border border-slate-700/80 px-3 py-1 text-xs">
-                  <span
-                    className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-slate-500"}`}
-                  />
-                  {connected ? "Phone connected" : "Waiting for phone"}
-                </div>
-              )}
-            </div>
-
-            {role === "host" ? (
-              <div className="mt-4 space-y-4">
-                <div className="flex flex-wrap gap-4">
-                  <div className="h-36 w-36 rounded-xl bg-slate-800 p-2">
-                    {qrDataUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={qrDataUrl}
-                        alt="Session QR"
-                        className="h-full w-full rounded-lg bg-white p-2"
-                      />
-                    ) : (
-                      <div className="flex h-full w-full items-center justify-center text-xs text-slate-400">
-                        Generating QR...
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex min-w-0 flex-1 flex-col gap-2 text-sm">
-                    <div className="rounded-lg bg-slate-800/70 p-2 break-all text-slate-200">
-                      {phoneUrl || "Preparing phone link..."}
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        onClick={copyPhoneLink}
-                        disabled={!phoneUrl}
-                        className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 enabled:hover:bg-slate-800 disabled:opacity-40"
-                      >
-                        Copy Link
-                      </button>
-                      <button
-                        onClick={() => window.open(phoneUrl, "_blank")}
-                        disabled={!phoneUrl}
-                        className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 enabled:hover:bg-slate-800 disabled:opacity-40"
-                      >
-                        Open Phone View
-                      </button>
-                      <button
-                        onClick={handleManualRecenter}
-                        className="rounded-lg border border-slate-600 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800"
-                      >
-                        Recenter Motion
-                      </button>
-                      {hostPhase === "calibration" ? (
-                        <button
-                          onClick={launchGameFromCalibration}
-                          disabled={!canLaunchFromCalibration}
-                          className="rounded-lg border border-cyan-600/70 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200 enabled:hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          Calibrate & Launch
-                        </button>
-                      ) : (
-                        <>
-                          <button
-                            onClick={resetMatch}
-                            className="rounded-lg border border-cyan-600/70 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/20"
-                          >
-                            Reset Match
-                          </button>
-                          <button
-                            onClick={backToCalibration}
-                            className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800"
-                          >
-                            Back to Calibration
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {hostPhase === "calibration" ? (
-                  <>
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Connection</p>
-                        <p className="mt-2 text-sm text-slate-200">
-                          {connected ? "Phone telemetry streaming" : "Waiting for live packets"}
-                        </p>
-                        <p className="mt-1 text-xs text-slate-400">
-                          Launch unlocks once orientation data is received.
-                        </p>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Neutral Pose</p>
-                        <p className="mt-2 text-sm text-slate-200">
-                          {neutralReady ? "Calibrated" : "Not calibrated"}
-                        </p>
-                        <p className="mt-1 text-xs text-slate-400">
-                          Hold phone flat like a Wii Remote, then recenter.
-                        </p>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Live Motion</p>
-                        <p className="mt-2 text-sm text-slate-200">
-                          Roll {controlHud.roll.toFixed(2)} | Pitch {controlHud.pitch.toFixed(2)}
-                        </p>
-                        <p className="mt-1 text-xs text-slate-400">Swing {controlHud.swing.toFixed(2)}</p>
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-sm text-slate-300">
-                      <p className="font-medium text-slate-100">Calibration flow</p>
-                      <ol className="mt-2 list-decimal space-y-1 pl-4 text-slate-300">
-                        <li>Connect the phone and allow sensor access.</li>
-                        <li>Hold still in neutral position and press Recenter Motion.</li>
-                        <li>Press Calibrate & Launch to start the 3D match.</li>
-                      </ol>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div
-                      ref={renderMountRef}
-                      className="aspect-[16/9] w-full overflow-hidden rounded-xl border border-slate-800 bg-slate-950"
-                    />
-
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">You</p>
-                        <p className="mt-1 text-2xl font-semibold text-emerald-300">{gameHud.player}</p>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">CPU</p>
-                        <p className="mt-1 text-2xl font-semibold text-orange-300">{gameHud.cpu}</p>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Rally</p>
-                        <p className="mt-1 text-2xl font-semibold text-slate-100">{gameHud.rally}</p>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Controller</p>
-                        <p className="mt-1 text-sm text-slate-200">
-                          Roll {controlHud.roll.toFixed(2)} | Pitch {controlHud.pitch.toFixed(2)}
-                        </p>
-                        <p className="text-xs text-slate-400">Swing {controlHud.swing.toFixed(2)}</p>
-                      </div>
-                    </div>
-
-                    {gameHud.winner && (
-                      <div
-                        className={`rounded-xl border p-3 text-sm ${
-                          gameHud.winner === "player"
-                            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-                            : "border-rose-500/40 bg-rose-500/10 text-rose-200"
-                        }`}
-                      >
-                        {gameHud.winner === "player"
-                          ? "Match won. Timing and angle control worked."
-                          : "CPU won this match. Try faster forward swings and earlier timing."}
-                      </div>
-                    )}
-                  </>
-                )}
-
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-sm text-slate-300">
-                  {gameHud.status}
-                </div>
-              </div>
-            ) : (
-              <div className="mt-4 space-y-4 text-sm text-slate-200">
-                <p>
-                  Hold your phone like a Wii Remote. Swing forward to hit and rotate your wrist to direct the ball.
-                </p>
-
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                  <div className="flex items-center justify-between">
-                    <span>Sensor permission</span>
-                    <span className="text-xs text-slate-400">{permission}</span>
-                  </div>
-                  <button
-                    onClick={requestPermission}
-                    className="mt-3 w-full rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800"
+          <Grid container spacing={3}>
+            <Grid item xs={12} lg={8}>
+              <Paper elevation={0} sx={glassPanelSx}>
+                <Stack spacing={3} sx={{ p: { xs: 3, md: 4 } }}>
+                  <Stack
+                    direction={{ xs: "column", sm: "row" }}
+                    spacing={2}
+                    alignItems={{ xs: "flex-start", sm: "center" }}
+                    justifyContent="space-between"
                   >
-                    Enable Motion Access
-                  </button>
-                  {!sensorAvailable && (
-                    <p className="mt-3 text-xs text-rose-300">
-                      This browser/device does not expose motion sensors.
-                    </p>
+                    <Stack spacing={0.5}>
+                      <Typography variant="body2" color="text.secondary">
+                        Role:{" "}
+                        <Box component="span" sx={{ color: "text.primary", fontWeight: 600 }}>
+                          {role === "host" ? "Host" : "Phone"}
+                        </Box>
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Session:{" "}
+                        <Box component="span" sx={{ color: "text.primary", fontWeight: 600 }}>
+                          {session || "..."}
+                        </Box>
+                      </Typography>
+                    </Stack>
+
+                    {role === "host" && (
+                      <Stack
+                        direction="row"
+                        spacing={1}
+                        alignItems="center"
+                        sx={(theme) => ({
+                          px: 2,
+                          py: 0.75,
+                          borderRadius: 999,
+                          border: `1px solid ${alpha(theme.palette.common.white, 0.12)}`,
+                          background: alpha(theme.palette.background.default, 0.4),
+                        })}
+                      >
+                        <Box
+                          sx={{
+                            width: 8,
+                            height: 8,
+                            borderRadius: "50%",
+                            bgcolor: connected ? "success.main" : "grey.600",
+                            boxShadow: connected ? "0 0 10px rgba(16, 185, 129, 0.8)" : "none",
+                          }}
+                        />
+                        <Typography variant="caption" sx={{ fontWeight: 600 }}>
+                          {connected ? "Phone connected" : "Waiting for phone"}
+                        </Typography>
+                      </Stack>
+                    )}
+                  </Stack>
+
+                  <Divider sx={{ borderColor: alpha("#e2e8f0", 0.12) }} />
+
+                  {role === "host" ? (
+                    <Stack spacing={3}>
+                      <Grid container spacing={2} alignItems="stretch">
+                        <Grid item xs={12} sm={4} md={3}>
+                          <Paper
+                            variant="outlined"
+                            sx={(theme) => ({
+                              p: 1.5,
+                              height: "100%",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              borderRadius: 3,
+                              borderColor: alpha(theme.palette.common.white, 0.12),
+                              background: alpha(theme.palette.background.default, 0.6),
+                            })}
+                          >
+                            {qrDataUrl ? (
+                              <Box
+                                component="img"
+                                src={qrDataUrl}
+                                alt="Session QR"
+                                sx={{
+                                  width: "100%",
+                                  height: "100%",
+                                  maxWidth: 160,
+                                  maxHeight: 160,
+                                  borderRadius: 2,
+                                  backgroundColor: "#fff",
+                                  p: 1,
+                                }}
+                              />
+                            ) : (
+                              <Typography variant="caption" color="text.secondary">
+                                Generating QR...
+                              </Typography>
+                            )}
+                          </Paper>
+                        </Grid>
+
+                        <Grid item xs={12} sm={8} md={9}>
+                          <Stack spacing={2}>
+                            <Paper
+                              variant="outlined"
+                              sx={(theme) => ({
+                                px: 2,
+                                py: 1.5,
+                                borderRadius: 2,
+                                borderColor: alpha(theme.palette.common.white, 0.12),
+                                background: alpha(theme.palette.background.default, 0.5),
+                              })}
+                            >
+                              <Typography variant="body2" sx={{ wordBreak: "break-all", color: "text.primary" }}>
+                                {phoneUrl || "Preparing phone link..."}
+                              </Typography>
+                            </Paper>
+
+                            <Stack direction="row" spacing={1.5} useFlexGap sx={{ flexWrap: "wrap" }}>
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                onClick={copyPhoneLink}
+                                disabled={!phoneUrl}
+                              >
+                                Copy Link
+                              </Button>
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                onClick={() => window.open(phoneUrl, "_blank")}
+                                disabled={!phoneUrl}
+                              >
+                                Open Phone View
+                              </Button>
+                              <Button variant="outlined" size="small" onClick={handleManualRecenter}>
+                                Recenter Motion
+                              </Button>
+                              {hostPhase === "calibration" ? (
+                                <Button
+                                  variant="contained"
+                                  size="small"
+                                  onClick={launchGameFromCalibration}
+                                  disabled={!canLaunchFromCalibration}
+                                  sx={(theme) => ({
+                                    background: alpha(theme.palette.primary.main, 0.2),
+                                    border: `1px solid ${alpha(theme.palette.primary.main, 0.5)}`,
+                                    color: theme.palette.primary.light,
+                                    "&:hover": {
+                                      background: alpha(theme.palette.primary.main, 0.28),
+                                    },
+                                  })}
+                                >
+                                  Calibrate & Launch
+                                </Button>
+                              ) : (
+                                <>
+                                  <Button
+                                    variant="contained"
+                                    size="small"
+                                    onClick={resetMatch}
+                                    sx={(theme) => ({
+                                      background: alpha(theme.palette.primary.main, 0.2),
+                                      border: `1px solid ${alpha(theme.palette.primary.main, 0.5)}`,
+                                      color: theme.palette.primary.light,
+                                      "&:hover": {
+                                        background: alpha(theme.palette.primary.main, 0.28),
+                                      },
+                                    })}
+                                  >
+                                    Reset Match
+                                  </Button>
+                                  <Button variant="outlined" size="small" onClick={backToCalibration}>
+                                    Back to Calibration
+                                  </Button>
+                                </>
+                              )}
+                            </Stack>
+                          </Stack>
+                        </Grid>
+                      </Grid>
+
+                      {hostPhase === "calibration" ? (
+                        <Stack spacing={2.5}>
+                          <Grid container spacing={2}>
+                            <Grid item xs={12} md={4}>
+                              <Paper elevation={0} sx={(theme) => ({ p: 2, ...insetCardSx(theme) })}>
+                                <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: "0.2em" }}>
+                                  Connection
+                                </Typography>
+                                <Typography variant="body2" sx={{ mt: 1, color: "text.primary" }}>
+                                  {connected ? "Phone telemetry streaming" : "Waiting for live packets"}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
+                                  Launch unlocks once orientation data is received.
+                                </Typography>
+                              </Paper>
+                            </Grid>
+                            <Grid item xs={12} md={4}>
+                              <Paper elevation={0} sx={(theme) => ({ p: 2, ...insetCardSx(theme) })}>
+                                <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: "0.2em" }}>
+                                  Neutral Pose
+                                </Typography>
+                                <Typography variant="body2" sx={{ mt: 1, color: "text.primary" }}>
+                                  {neutralReady ? "Calibrated" : "Not calibrated"}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
+                                  Hold phone flat like a Wii Remote, then recenter.
+                                </Typography>
+                              </Paper>
+                            </Grid>
+                            <Grid item xs={12} md={4}>
+                              <Paper elevation={0} sx={(theme) => ({ p: 2, ...insetCardSx(theme) })}>
+                                <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: "0.2em" }}>
+                                  Live Motion
+                                </Typography>
+                                <Typography variant="body2" sx={{ mt: 1, color: "text.primary" }}>
+                                  Roll {controlHud.roll.toFixed(2)} | Pitch {controlHud.pitch.toFixed(2)}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
+                                  Swing {controlHud.swing.toFixed(2)}
+                                </Typography>
+                              </Paper>
+                            </Grid>
+                          </Grid>
+
+                          <Paper elevation={0} sx={(theme) => ({ p: 2.5, ...insetCardSx(theme) })}>
+                            <Typography variant="subtitle2" sx={{ color: "text.primary" }}>
+                              Calibration flow
+                            </Typography>
+                            <Box
+                              component="ol"
+                              sx={{
+                                m: 0,
+                                mt: 1,
+                                pl: 2.5,
+                                color: "text.secondary",
+                                "& li": { mb: 0.5 },
+                              }}
+                            >
+                              <li>Connect the phone and allow sensor access.</li>
+                              <li>Hold still in neutral position and press Recenter Motion.</li>
+                              <li>Press Calibrate & Launch to start the 3D match.</li>
+                            </Box>
+                          </Paper>
+                        </Stack>
+                      ) : (
+                        <Stack spacing={2.5}>
+                          <Box
+                            ref={renderMountRef}
+                            sx={(theme) => ({
+                              width: "100%",
+                              aspectRatio: "16 / 9",
+                              borderRadius: 3,
+                              overflow: "hidden",
+                              border: `1px solid ${alpha(theme.palette.common.white, 0.12)}`,
+                              background: alpha(theme.palette.background.default, 0.7),
+                            })}
+                          />
+
+                          <Grid container spacing={2}>
+                            <Grid item xs={12} sm={6} md={3}>
+                              <Paper elevation={0} sx={(theme) => ({ p: 2, ...insetCardSx(theme) })}>
+                                <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: "0.2em" }}>
+                                  You
+                                </Typography>
+                                <Typography variant="h4" sx={{ mt: 0.5, color: "success.light" }}>
+                                  {gameHud.player}
+                                </Typography>
+                              </Paper>
+                            </Grid>
+                            <Grid item xs={12} sm={6} md={3}>
+                              <Paper elevation={0} sx={(theme) => ({ p: 2, ...insetCardSx(theme) })}>
+                                <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: "0.2em" }}>
+                                  CPU
+                                </Typography>
+                                <Typography variant="h4" sx={{ mt: 0.5, color: "secondary.main" }}>
+                                  {gameHud.cpu}
+                                </Typography>
+                              </Paper>
+                            </Grid>
+                            <Grid item xs={12} sm={6} md={3}>
+                              <Paper elevation={0} sx={(theme) => ({ p: 2, ...insetCardSx(theme) })}>
+                                <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: "0.2em" }}>
+                                  Rally
+                                </Typography>
+                                <Typography variant="h4" sx={{ mt: 0.5, color: "text.primary" }}>
+                                  {gameHud.rally}
+                                </Typography>
+                              </Paper>
+                            </Grid>
+                            <Grid item xs={12} sm={6} md={3}>
+                              <Paper elevation={0} sx={(theme) => ({ p: 2, ...insetCardSx(theme) })}>
+                                <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: "0.2em" }}>
+                                  Controller
+                                </Typography>
+                                <Typography variant="body2" sx={{ mt: 0.5, color: "text.primary" }}>
+                                  Roll {controlHud.roll.toFixed(2)} | Pitch {controlHud.pitch.toFixed(2)}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary">
+                                  Swing {controlHud.swing.toFixed(2)}
+                                </Typography>
+                              </Paper>
+                            </Grid>
+                          </Grid>
+
+                          {gameHud.winner && (
+                            <Alert
+                              severity={gameHud.winner === "player" ? "success" : "error"}
+                              variant="outlined"
+                              sx={(theme) => ({
+                                borderRadius: 3,
+                                borderColor: alpha(theme.palette.common.white, 0.12),
+                                background: alpha(theme.palette.background.default, 0.5),
+                              })}
+                            >
+                              {gameHud.winner === "player"
+                                ? "Match won. Timing and angle control worked."
+                                : "CPU won this match. Try faster forward swings and earlier timing."}
+                            </Alert>
+                          )}
+                        </Stack>
+                      )}
+
+                      <Paper elevation={0} sx={(theme) => ({ p: 2, ...insetCardSx(theme) })}>
+                        <Typography variant="body2" color="text.secondary">
+                          {gameHud.status}
+                        </Typography>
+                      </Paper>
+                    </Stack>
+                  ) : (
+                    <Stack spacing={2.5}>
+                      <Typography variant="body2" color="text.secondary">
+                        Hold your phone like a Wii Remote. Swing forward to hit and rotate your wrist to direct the
+                        ball.
+                      </Typography>
+
+                      <Paper elevation={0} sx={(theme) => ({ p: 2.5, ...insetCardSx(theme) })}>
+                        <Stack direction="row" alignItems="center" justifyContent="space-between">
+                          <Typography variant="subtitle2" color="text.primary">
+                            Sensor permission
+                          </Typography>
+                          <Chip
+                            label={permission}
+                            size="small"
+                            sx={(theme) => ({
+                              textTransform: "uppercase",
+                              letterSpacing: "0.12em",
+                              fontSize: "0.65rem",
+                              background: alpha(theme.palette.background.paper, 0.6),
+                              color: theme.palette.text.secondary,
+                            })}
+                          />
+                        </Stack>
+                        <Button variant="outlined" size="small" onClick={requestPermission} fullWidth sx={{ mt: 2 }}>
+                          Enable Motion Access
+                        </Button>
+                        {!sensorAvailable && (
+                          <Alert severity="warning" sx={{ mt: 2 }}>
+                            This browser/device does not expose motion sensors.
+                          </Alert>
+                        )}
+                      </Paper>
+
+                      <Paper elevation={0} sx={(theme) => ({ p: 2.5, ...insetCardSx(theme) })}>
+                        <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: "0.2em" }}>
+                          Live telemetry
+                        </Typography>
+                        <Typography variant="body2" sx={{ mt: 1, color: "text.primary" }}>
+                          Roll {phoneTelemetry.roll.toFixed(2)} | Pitch {phoneTelemetry.pitch.toFixed(2)}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          Swing {phoneTelemetry.swing.toFixed(2)}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+                          Packets sent: {phoneTelemetry.packets}
+                        </Typography>
+                        <LinearProgress
+                          variant="determinate"
+                          value={clamp(phoneTelemetry.swing, 0, 1) * 100}
+                          sx={(theme) => ({
+                            mt: 2,
+                            height: 8,
+                            borderRadius: 999,
+                            backgroundColor: alpha(theme.palette.common.white, 0.12),
+                            "& .MuiLinearProgress-bar": {
+                              borderRadius: 999,
+                              background: theme.palette.primary.main,
+                            },
+                          })}
+                        />
+                      </Paper>
+
+                      <Paper elevation={0} sx={(theme) => ({ p: 2.5, ...insetCardSx(theme) })}>
+                        <Typography variant="caption" color="text.secondary">
+                          Use a backswing then a forward release. Wrist roll and lift shape cross-court, topspin, and
+                          slice.
+                        </Typography>
+                      </Paper>
+                    </Stack>
                   )}
-                </div>
+                </Stack>
+              </Paper>
+            </Grid>
 
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                  <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Live telemetry</p>
-                  <p className="mt-2 text-sm text-slate-300">
-                    Roll {phoneTelemetry.roll.toFixed(2)} | Pitch {phoneTelemetry.pitch.toFixed(2)}
-                  </p>
-                  <p className="mt-1 text-sm text-slate-300">Swing {phoneTelemetry.swing.toFixed(2)}</p>
-                  <p className="mt-1 text-xs text-slate-400">Packets sent: {phoneTelemetry.packets}</p>
-                  <div className="mt-3 h-2 overflow-hidden rounded bg-slate-800">
-                    <div
-                      className="h-full bg-cyan-400 transition-all"
-                      style={{ width: `${clamp(phoneTelemetry.swing, 0, 1) * 100}%` }}
-                    />
-                  </div>
-                </div>
-
-                <p className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-xs text-slate-400">
-                  Use a backswing then a forward release. Wrist roll and lift shape cross-court, topspin, and slice.
-                </p>
-              </div>
-            )}
-          </section>
-
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/65 p-6">
-            <h2 className="text-lg font-semibold">3D Wii-Style Flow</h2>
-            <ol className="mt-3 list-decimal space-y-2 pl-4 text-sm text-slate-300">
-              <li>Run host on PC and scan the QR code with your phone.</li>
-              <li>Enable motion sensors on phone.</li>
-              <li>Use tennis-like backswing then release to trigger each shot.</li>
-              <li>Roll and lift your wrist through contact to shape direction and spin.</li>
-            </ol>
-            <p className="mt-4 text-xs text-slate-500">
-              POV camera is active during play.
-            </p>
-          </section>
-        </div>
-      </div>
-    </main>
+            <Grid item xs={12} lg={4}>
+              <Paper elevation={0} sx={(theme) => ({ ...glassPanelSx(theme), p: { xs: 3, md: 4 } })}>
+                <Stack spacing={2}>
+                  <Typography variant="h6">3D Wii-Style Flow</Typography>
+                  <Box
+                    component="ol"
+                    sx={{
+                      m: 0,
+                      pl: 2.5,
+                      color: "text.secondary",
+                      "& li": { mb: 1 },
+                    }}
+                  >
+                    <li>Run host on PC and scan the QR code with your phone.</li>
+                    <li>Enable motion sensors on phone.</li>
+                    <li>Use tennis-like backswing then release to trigger each shot.</li>
+                    <li>Roll and lift your wrist through contact to shape direction and spin.</li>
+                  </Box>
+                  <Divider sx={{ borderColor: alpha("#e2e8f0", 0.12) }} />
+                  <Typography variant="caption" color="text.secondary">
+                    POV camera is active during play.
+                  </Typography>
+                </Stack>
+              </Paper>
+            </Grid>
+          </Grid>
+        </Stack>
+      </Container>
+    </Box>
   );
 }
