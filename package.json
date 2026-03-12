@@ -9,9 +9,6 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@emotion/react": "^11.11.4",
-    "@emotion/styled": "^11.11.0",
-    "@mui/material": "^5.15.20",
     "next": "16.1.6",
     "qrcode": "^1.5.4",
     "react": "19.2.3",
