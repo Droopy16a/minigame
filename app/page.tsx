@@ -4,42 +4,24 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import * as THREE from "three";
 
-type OrientationSample = {
-  alpha: number | null;
-  beta: number | null;
-  gamma: number | null;
-  absolute: boolean | null;
-};
-
-type MotionSample = {
-  orientation: OrientationSample | null;
-  rotationRate: {
-    alpha: number | null;
-    beta: number | null;
-    gamma: number | null;
-  } | null;
-  acceleration: {
-    x: number | null;
-    y: number | null;
-    z: number | null;
-  } | null;
-  accelerationIncludingGravity: {
-    x: number | null;
-    y: number | null;
-    z: number | null;
-  } | null;
-  interval: number | null;
+type InputPacket = {
+  x: number; // 0.0 to 1.0 (normalized screen width)
+  y: number; // 0.0 to 1.0 (normalized screen height)
+  vx: number; // Velocity X
+  vy: number; // Velocity Y
+  swing: boolean; // Swing trigger
 };
 
 type StoreEntry = {
   t: number;
   seq: number;
-  sample: MotionSample | null;
+  packet: InputPacket | null;
 };
 
 type PermissionState = "unknown" | "granted" | "denied";
 type ScoreOwner = "player" | "cpu";
 type HostPhase = "calibration" | "game";
+type InputSource = "pc" | "phone" | null;
 
 type SwingPacket = {
   strength: number;
@@ -51,22 +33,11 @@ type SwingPacket = {
 type SwingAxis = "alpha" | "beta" | "gamma";
 
 type ControlState = {
-  // Orientation
-  quaternion: THREE.Quaternion; // Current relative orientation
-  calibrationQuaternion: THREE.Quaternion; // Inverse of neutral pose
-  calibrated: boolean;
-  
-  // Visual/Physics Euler
-  racketRoll: number;
-  racketPitch: number;
-  racketYaw: number;
-
-  // Swing
-  angularVelocity: number;
+  targetX: number;
+  targetY: number;
   pendingSwing: SwingPacket | null;
   lastSwingTime: number;
   
-  // Internal
   lastSeq: number;
 };
 
@@ -106,20 +77,6 @@ type SimState = {
   match: MatchState;
 };
 
-type PermissionRequestCapable = {
-  requestPermission?: () => Promise<"granted" | "denied">;
-};
-
-type WakeLockSentinelLike = {
-  release: () => Promise<void>;
-};
-
-type WakeLockCapableNavigator = Navigator & {
-  wakeLock?: {
-    request: (type: "screen") => Promise<WakeLockSentinelLike>;
-  };
-};
-
 type AvatarVisual = {
   group: THREE.Group;
   swingPivot: THREE.Object3D;
@@ -147,9 +104,8 @@ const HIT_Y_MIN = 0.35;
 const HIT_Y_MAX = 2.8;
 const SWING_DURATION = 0.32;
 const SWING_COOLDOWN = 0.16;
-const SWING_THRESHOLD = 5.0; // Radians per second
 const SWING_REARM_MS = 250;
-const ORIENTATION_SMOOTHING = 0.25;
+const POSITION_SMOOTHING = 0.15;
 
 const CONNECTION_TIMEOUT_MS = 1200;
 const POINTS_TO_WIN = 7;
@@ -165,98 +121,35 @@ function makeSessionId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function blankSample(): MotionSample {
-  return {
-    orientation: null,
-    rotationRate: null,
-    acceleration: null,
-    accelerationIncludingGravity: null,
-    interval: null,
-  };
-}
+function updateControlFromPacket(
+  control: ControlState,
+  packet: InputPacket | null,
+  sampleTime: number,
+) {
+  if (!packet) return;
 
-function getRawRoll(sample: MotionSample | null): number | null {
-  const gamma = sample?.orientation?.gamma;
-  return typeof gamma === "number" && Number.isFinite(gamma) ? gamma : null;
-}
+  // Smooth position
+  // Map X (0..1) to (-1..1) range for tracking logic
+  const targetX = (packet.x - 0.5) * 2;
+  const targetY = (packet.y - 0.5) * 2;
 
-function getRawPitch(sample: MotionSample | null): number | null {
-  const beta = sample?.orientation?.beta;
-  return typeof beta === "number" && Number.isFinite(beta) ? beta : null;
-}
+  control.targetX =
+    control.targetX + (targetX - control.targetX) * POSITION_SMOOTHING;
+  control.targetY =
+    control.targetY + (targetY - control.targetY) * POSITION_SMOOTHING;
 
-function getRawYaw(sample: MotionSample | null): number | null {
-  const alpha = sample?.orientation?.alpha;
-  return typeof alpha === "number" && Number.isFinite(alpha) ? alpha : null;
-}
-
-// Reusable 3D objects to avoid GC
-const _qDevice = new THREE.Quaternion();
-const _qCalib = new THREE.Quaternion();
-const _qRel = new THREE.Quaternion();
-const _euler = new THREE.Euler();
-const _deg2rad = Math.PI / 180;
-
-function getDeviceQuaternion(alpha: number, beta: number, gamma: number, target: THREE.Quaternion) {
-  // Convert device orientation (degrees) to quaternion
-  // ZXY order is often used for device orientation, but YXZ works well for phone-forward
-  _euler.set(beta * _deg2rad, alpha * _deg2rad, -gamma * _deg2rad, 'YXZ');
-  target.setFromEuler(_euler);
-}
-
-function updateControlFromSample(control: ControlState, sample: MotionSample | null, sampleTime: number) {
-  const rawAlpha = getRawYaw(sample);
-  const rawBeta = getRawPitch(sample);
-  const rawGamma = getRawRoll(sample);
-
-  // 1. Update Orientation
-  if (rawAlpha !== null && rawBeta !== null && rawGamma !== null) {
-    // Get current raw rotation
-    getDeviceQuaternion(rawAlpha, rawBeta, rawGamma, _qDevice);
-
-    // If not calibrated or auto-calibrating (first frame), set calibration
-    if (!control.calibrated) {
-      control.calibrated = true;
-      // Calibration is the inverse of the current rotation (makes current pose "identity")
-      control.calibrationQuaternion.copy(_qDevice).invert();
-    }
-
-    // Apply calibration: Q_rel = Q_calib * Q_device
-    _qRel.multiplyQuaternions(control.calibrationQuaternion, _qDevice);
+  // Detect Swing
+  if (packet.swing && sampleTime - control.lastSwingTime > SWING_REARM_MS) {
+    control.lastSwingTime = sampleTime;
+    // Map vertical movement to pitch, horizontal speed to strength
+    const velocityMag = Math.sqrt(packet.vx ** 2 + packet.vy ** 2);
     
-    // Smoothly interpolate current state towards new sample
-    control.quaternion.slerp(_qRel, ORIENTATION_SMOOTHING);
-
-    // Extract Euler angles for game physics (Roll/Pitch/Yaw)
-    // Order YXZ: Yaw (Y) -> Pitch (X) -> Roll (Z) matches tennis mechanics well
-    _euler.setFromQuaternion(control.quaternion, 'YXZ');
-    
-    control.racketYaw = -_euler.y;   // Left/Right aiming
-    control.racketPitch = _euler.x;  // Up/Down tilt
-    control.racketRoll = -_euler.z;  // Wrist twist (spin)
-  }
-
-  // 2. Detect Swing via Angular Velocity
-  const rate = sample?.rotationRate;
-  if (rate) {
-    const alphaRad = (rate.alpha || 0) * _deg2rad;
-    const betaRad = (rate.beta || 0) * _deg2rad;
-    const gammaRad = (rate.gamma || 0) * _deg2rad;
-    
-    // Magnitude of angular velocity vector
-    const angularSpeed = Math.sqrt(alphaRad**2 + betaRad**2 + gammaRad**2);
-    control.angularVelocity = angularSpeed;
-
-    // Trigger swing if threshold exceeded and cooldown passed
-    if (angularSpeed > SWING_THRESHOLD && (sampleTime - control.lastSwingTime > SWING_REARM_MS)) {
-      control.lastSwingTime = sampleTime;
-      control.pendingSwing = {
-        strength: clamp(angularSpeed / 10, 0.3, 1.0), // Normalize strength
-        roll: control.racketRoll,
-        pitch: control.racketPitch,
-        at: sampleTime,
-      };
-    }
+    control.pendingSwing = {
+      strength: clamp(velocityMag / 15, 0.4, 1.0),
+      roll: -control.targetX * 0.5, // Wrist roll based on position (simple mechanic)
+      pitch: -control.targetY * 0.8, // Pitch based on height of object
+      at: sampleTime,
+    };
   }
 }
 
@@ -471,6 +364,161 @@ function createAvatarVisual(side: ScoreOwner): AvatarVisual {
   };
 }
 
+// --- CAMERA TRACKING HELPER ---
+type RgbColor = { r: number; g: number; b: number };
+
+function CameraController({
+  onPacket,
+}: {
+  onPacket: (p: InputPacket) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [trackingColor, setTrackingColor] = useState<RgbColor | null>(null);
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const lastPos = useRef({ x: 0.5, y: 0.5 });
+  const velocity = useRef({ x: 0, y: 0 });
+
+  useEffect(() => {
+    let active = true;
+    navigator.mediaDevices
+      .getUserMedia({ video: { width: 320, height: 240, facingMode: "environment" }, audio: false })
+      .then((s) => {
+        if (active) {
+          setStream(s);
+          if (videoRef.current) {
+            videoRef.current.srcObject = s;
+            videoRef.current.play().catch(() => {});
+          }
+        }
+      })
+      .catch((e) => console.error("Camera denied", e));
+
+    return () => {
+      active = false;
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!trackingColor) return;
+    let raf = 0;
+
+    const process = () => {
+      if (!videoRef.current || !canvasRef.current) return;
+      const vid = videoRef.current;
+      const ctx = canvasRef.current.getContext("2d");
+      if (!ctx || vid.readyState < 2) {
+        raf = requestAnimationFrame(process);
+        return;
+      }
+
+      // Draw small frame for processing
+      ctx.drawImage(vid, 0, 0, 64, 48);
+      const frame = ctx.getImageData(0, 0, 64, 48);
+      const data = frame.data;
+      let sumX = 0;
+      let sumY = 0;
+      let count = 0;
+
+      // Simple color threshold
+      const threshold = 60; 
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        // Euclidean dist
+        const dist = Math.sqrt(
+          (r - trackingColor.r) ** 2 + (g - trackingColor.g) ** 2 + (b - trackingColor.b) ** 2
+        );
+
+        if (dist < threshold) {
+          const pixelIdx = i / 4;
+          const x = pixelIdx % 64;
+          const y = Math.floor(pixelIdx / 64);
+          sumX += x;
+          sumY += y;
+          count++;
+        }
+      }
+
+      if (count > 20) {
+        // Mirror X
+        const avgX = 1 - (sumX / count) / 64;
+        const avgY = (sumY / count) / 48;
+        
+        const dx = (avgX - lastPos.current.x) * 40; // Scale up velocity
+        const dy = (avgY - lastPos.current.y) * 40;
+        
+        velocity.current.x = velocity.current.x * 0.6 + dx * 0.4;
+        velocity.current.y = velocity.current.y * 0.6 + dy * 0.4;
+        
+        lastPos.current = { x: avgX, y: avgY };
+
+        const speed = Math.sqrt(velocity.current.x**2 + velocity.current.y**2);
+        const isSwing = speed > 3.5; // Threshold for swing
+
+        onPacket({ x: avgX, y: avgY, vx: velocity.current.x, vy: velocity.current.y, swing: isSwing });
+      }
+
+      raf = requestAnimationFrame(process);
+    };
+    process();
+    return () => cancelAnimationFrame(raf);
+  }, [trackingColor]);
+
+  const handleCanvasClick = (e: React.MouseEvent) => {
+    if (!canvasRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = Math.floor(((e.clientX - rect.left) / rect.width) * 64);
+    const y = Math.floor(((e.clientY - rect.top) / rect.height) * 48);
+    const ctx = canvasRef.current.getContext("2d");
+    if (ctx) {
+      const p = ctx.getImageData(x, y, 1, 1).data;
+      setTrackingColor({ r: p[0], g: p[1], b: p[2] });
+    }
+  };
+
+  return (
+    <div className="relative overflow-hidden rounded-xl border-2 border-slate-700 bg-black">
+      {/* Hidden processing canvas */}
+      <canvas ref={canvasRef} width={64} height={48} className="absolute inset-0 h-full w-full opacity-0 pointer-events-none" />
+      
+      {/* Visible Video feed */}
+      <video
+        ref={videoRef}
+        muted
+        playsInline
+        className="h-64 w-full object-cover mirror -scale-x-100"
+      />
+      
+      {/* Interaction Layer */}
+      <div 
+        className="absolute inset-0 cursor-crosshair active:ring-4 ring-emerald-500/50"
+        onClick={handleCanvasClick}
+      >
+        {!trackingColor && (
+          <div className="flex h-full items-center justify-center bg-black/40">
+            <p className="px-4 text-center text-sm font-bold text-white drop-shadow-md">
+              Tap a colored object<br/>to track it
+            </p>
+          </div>
+        )}
+        {trackingColor && (
+          <div 
+            className="absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-sm transition-all duration-75 ease-linear"
+            style={{ 
+              left: `${lastPos.current.x * 100}%`, 
+              top: `${lastPos.current.y * 100}%`,
+              backgroundColor: `rgb(${trackingColor.r},${trackingColor.g},${trackingColor.b})`
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
   const [role, setRole] = useState<"host" | "phone">("host");
   const [session, setSession] = useState("");
@@ -480,34 +528,24 @@ export default function Home() {
   const [permission, setPermission] = useState<PermissionState>("unknown");
   const [sensorAvailable, setSensorAvailable] = useState(true);
   const [clock, setClock] = useState(() => Date.now());
-  const [phoneTelemetry, setPhoneTelemetry] = useState({
-    roll: 0,
-    pitch: 0,
-    swing: 0,
-    packets: 0,
-  });
+  const [packetStats, setPacketStats] = useState({ packets: 0 });
+
   const [gameHud, setGameHud] = useState({
     player: 0,
     cpu: 0,
     rally: 0,
     winner: null as ScoreOwner | null,
-    status: "Swing your phone to serve",
+    status: "Track an object to serve",
   });
-  const [controlHud, setControlHud] = useState({ roll: 0, pitch: 0, swing: 0 });
   const [hostPhase, setHostPhase] = useState<HostPhase>("calibration");
-  const [neutralReady, setNeutralReady] = useState(false);
+  const [inputSource, setInputSource] = useState<InputSource>(null);
 
-  const latestRef = useRef<MotionSample | null>(null);
+  const latestRef = useRef<InputPacket | null>(null);
   const sendingRef = useRef(false);
   const packetsRef = useRef(0);
   const controlRef = useRef<ControlState>({
-    quaternion: new THREE.Quaternion(),
-    calibrationQuaternion: new THREE.Quaternion(),
-    calibrated: false,
-    racketRoll: 0,
-    racketPitch: 0,
-    racketYaw: 0,
-    angularVelocity: 0,
+    targetX: 0,
+    targetY: 0,
     pendingSwing: null,
     lastSwingTime: 0,
     lastSeq: -1,
@@ -594,163 +632,51 @@ export default function Home() {
     if (latest.seq === control.lastSeq) return;
     control.lastSeq = latest.seq;
 
-    updateControlFromSample(control, latest.sample, latest.t);
-    setNeutralReady(control.calibrated);
-
-    // We don't set pendingSwing here anymore, it's done inside updateControlFromSample
-    // based on angular velocity.
+    updateControlFromPacket(control, latest.packet, latest.t);
   }, [latest]);
 
   useEffect(() => {
     if (role !== "phone") return;
-
-    const hasMotion = "DeviceMotionEvent" in window;
-    const hasOrientation = "DeviceOrientationEvent" in window;
-    setSensorAvailable(hasMotion || hasOrientation);
-
-    const motionCtor = (
-      window as Window & { DeviceMotionEvent?: PermissionRequestCapable }
-    ).DeviceMotionEvent;
-    const orientationCtor = (
-      window as Window & { DeviceOrientationEvent?: PermissionRequestCapable }
-    ).DeviceOrientationEvent;
-
-    if (!motionCtor?.requestPermission && !orientationCtor?.requestPermission) {
-      setPermission("granted");
-    }
+    navigator.mediaDevices.enumerateDevices().then(devices => {
+        setSensorAvailable(devices.some(d => d.kind === 'videoinput'));
+    });
+    setPermission("granted"); // Assume granted flow for camera usually prompts automatically
   }, [role]);
 
-  useEffect(() => {
-    if (role !== "phone") return;
+  // Host-local tracking handler (if using PC camera)
+  const handleLocalPacket = (packet: InputPacket) => {
+    const control = controlRef.current;
+    updateControlFromPacket(control, packet, performance.now());
+  };
 
-    const wakeCapableNav = navigator as WakeLockCapableNavigator;
-    let active = true;
-    let wakeLock: WakeLockSentinelLike | null = null;
-
-    const requestWakeLock = async () => {
-      if (!active || document.visibilityState !== "visible") return;
-      if (!wakeCapableNav.wakeLock?.request) return;
-
-      try {
-        wakeLock = await wakeCapableNav.wakeLock.request("screen");
-      } catch {
-        // Ignore unsupported or blocked wake lock attempts.
-      }
-    };
-
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        void requestWakeLock();
-      }
-    };
-
-    void requestWakeLock();
-    document.addEventListener("visibilitychange", onVisibilityChange);
-
-    return () => {
-      active = false;
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-      if (wakeLock) {
-        void wakeLock.release().catch(() => {
-          // Ignore release errors during teardown.
-        });
-      }
-    };
-  }, [role]);
+  // Phone tracking handler (sends to host)
+  const handlePhonePacket = (packet: InputPacket) => {
+    latestRef.current = packet;
+  };
 
   useEffect(() => {
     if (role !== "phone" || !session) return;
 
-    latestRef.current = blankSample();
     packetsRef.current = 0;
-    setPhoneTelemetry({ roll: 0, pitch: 0, swing: 0, packets: 0 });
 
     let mounted = true;
-    let lastPreview = 0;
-    let previewAccelMag = 9.8;
-
-    const publishPreview = () => {
-      const now = performance.now();
-      if (now - lastPreview < 100) return;
-      lastPreview = now;
-
-      const sample = latestRef.current;
-      const roll = getRawRoll(sample);
-      const pitch = getRawPitch(sample);
-      
-      // Simple angular speed preview
-      const rate = sample?.rotationRate;
-      const speed = rate 
-        ? Math.sqrt((rate.alpha||0)**2 + (rate.beta||0)**2 + (rate.gamma||0)**2) * _deg2rad 
-        : 0;
-
-      setPhoneTelemetry((prev) => ({
-        ...prev,
-        roll: roll == null ? prev.roll : clamp(roll / 45, -1, 1),
-        pitch: pitch == null ? prev.pitch : clamp((pitch - 20) / 65, -1, 1),
-        swing: clamp(speed / 10, 0, 1),
-      }));
-    };
-
-    const motionHandler = (event: DeviceMotionEvent) => {
-      const sample = latestRef.current ?? blankSample();
-      sample.rotationRate = event.rotationRate
-        ? {
-            alpha: event.rotationRate.alpha ?? null,
-            beta: event.rotationRate.beta ?? null,
-            gamma: event.rotationRate.gamma ?? null,
-          }
-        : null;
-      sample.acceleration = event.acceleration
-        ? {
-            x: event.acceleration.x ?? null,
-            y: event.acceleration.y ?? null,
-            z: event.acceleration.z ?? null,
-          }
-        : null;
-      sample.accelerationIncludingGravity = event.accelerationIncludingGravity
-        ? {
-            x: event.accelerationIncludingGravity.x ?? null,
-            y: event.accelerationIncludingGravity.y ?? null,
-            z: event.accelerationIncludingGravity.z ?? null,
-          }
-        : null;
-      sample.interval = event.interval ?? null;
-
-      latestRef.current = sample;
-      publishPreview();
-    };
-
-    const orientationHandler = (event: DeviceOrientationEvent) => {
-      const sample = latestRef.current ?? blankSample();
-      sample.orientation = {
-        alpha: event.alpha ?? null,
-        beta: event.beta ?? null,
-        gamma: event.gamma ?? null,
-        absolute: event.absolute ?? null,
-      };
-
-      latestRef.current = sample;
-      publishPreview();
-    };
-
-    window.addEventListener("devicemotion", motionHandler);
-    window.addEventListener("deviceorientation", orientationHandler);
 
     const interval = window.setInterval(async () => {
       if (sendingRef.current || !mounted) return;
+      if (!latestRef.current) return;
+
       sendingRef.current = true;
 
       try {
         await fetch("/api/motion", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session, sample: latestRef.current }),
+          body: JSON.stringify({ session, packet: latestRef.current }),
         });
 
         packetsRef.current += 1;
         if (packetsRef.current % 4 === 0) {
-          setPhoneTelemetry((prev) => ({ ...prev, packets: packetsRef.current }));
+          setPacketStats({ packets: packetsRef.current });
         }
       } catch {
         // Ignore transient network errors.
@@ -761,8 +687,6 @@ export default function Home() {
 
     return () => {
       mounted = false;
-      window.removeEventListener("devicemotion", motionHandler);
-      window.removeEventListener("deviceorientation", orientationHandler);
       window.clearInterval(interval);
     };
   }, [role, session]);
@@ -772,13 +696,8 @@ export default function Home() {
 
     simRef.current = createSimState();
     controlRef.current = {
-      quaternion: new THREE.Quaternion(),
-      calibrationQuaternion: new THREE.Quaternion(),
-      calibrated: false,
-      racketRoll: 0,
-      racketPitch: 0,
-      racketYaw: 0,
-      angularVelocity: 0,
+      targetX: 0,
+      targetY: 0,
       pendingSwing: null,
       lastSwingTime: 0,
       lastSeq: -1,
@@ -788,11 +707,10 @@ export default function Home() {
       cpu: 0,
       rally: 0,
       winner: null,
-      status: "Swing your phone to serve",
+      status: "Track object to serve",
     });
-    setControlHud({ roll: 0, pitch: 0, swing: 0 });
     setHostPhase("calibration");
-    setNeutralReady(false);
+    setInputSource(null);
   }, [role]);
 
   useEffect(() => {
@@ -981,11 +899,6 @@ export default function Home() {
         winner: match.winner,
         status: match.status,
       });
-      setControlHud({
-        roll: control.racketRoll,
-        pitch: control.racketPitch,
-        swing: control.angularVelocity,
-      });
     };
 
     const awardPoint = (winner: ScoreOwner, reason: string) => {
@@ -1102,6 +1015,11 @@ export default function Home() {
       sim.cpu.x = approach(sim.cpu.x, sim.cpu.targetX, CPU_SPEED * dt);
 
       for (const avatar of [sim.player, sim.cpu]) {
+        const speed = Math.abs(avatar.x - (avatar === sim.player ? control.targetX : sim.cpu.targetX));
+        // Add little lean based on movement
+        const moveLean = clamp(speed * 2, -0.5, 0.5);
+        if (avatar === sim.player) avatar.roll = control.targetX * 0.5;
+        
         avatar.cooldown = Math.max(0, avatar.cooldown - dt);
         avatar.flash = Math.max(0, avatar.flash - dt);
         if (avatar.swingT > 0) {
@@ -1319,33 +1237,9 @@ export default function Home() {
     };
   }, [role, hostPhase]);
 
-  const requestPermission = async () => {
-    try {
-      const motionCtor = (
-        window as Window & { DeviceMotionEvent?: PermissionRequestCapable }
-      ).DeviceMotionEvent;
-      const orientationCtor = (
-        window as Window & { DeviceOrientationEvent?: PermissionRequestCapable }
-      ).DeviceOrientationEvent;
-
-      const requests: Array<Promise<"granted" | "denied">> = [];
-      if (motionCtor?.requestPermission) {
-        requests.push(motionCtor.requestPermission());
-      }
-      if (orientationCtor?.requestPermission) {
-        requests.push(orientationCtor.requestPermission());
-      }
-
-      if (requests.length === 0) {
-        setPermission("granted");
-        return;
-      }
-
-      const results = await Promise.all(requests);
-      setPermission(results.every((result) => result === "granted") ? "granted" : "denied");
-    } catch {
-      setPermission("denied");
-    }
+  const requestCamera = async () => {
+     // The CameraController handles the stream request.
+     // This function is kept for button compatibility if needed.
   };
 
   const copyPhoneLink = async () => {
@@ -1361,84 +1255,16 @@ export default function Home() {
     resetSimState(simRef.current);
     const control = controlRef.current;
     control.pendingSwing = null;
-    control.angularVelocity = 0;
     control.lastSwingTime = 0;
-    control.racketRoll = 0;
-    control.racketPitch = 0;
-    control.racketYaw = 0;
     setGameHud({
       player: 0,
       cpu: 0,
       rally: 0,
       winner: null,
-      status: "Swing your phone to serve",
+      status: "Track object to serve",
     });
-    setControlHud((prev) => ({ ...prev, swing: 0 }));
   };
 
-  const canLaunchFromCalibration =
-    connected &&
-    latest?.sample?.orientation != null &&
-    typeof latest.sample.orientation.beta === "number" &&
-    typeof latest.sample.orientation.gamma === "number";
-
-  const recenterController = () => {
-    const control = controlRef.current;
-    const sample = latest?.sample ?? null;
-    
-    // Grab current orientation
-    const rawAlpha = getRawYaw(sample);
-    const rawBeta = getRawPitch(sample);
-    const rawGamma = getRawRoll(sample);
-
-    if (rawAlpha !== null && rawBeta !== null && rawGamma !== null) {
-      getDeviceQuaternion(rawAlpha, rawBeta, rawGamma, _qDevice);
-      // Recalibrate: Set neutral to current
-      control.calibrationQuaternion.copy(_qDevice).invert();
-      control.calibrated = true;
-      
-      // Reset control values
-      control.racketRoll = 0;
-      control.racketPitch = 0;
-      control.racketYaw = 0;
-      setNeutralReady(true);
-      setControlHud((prev) => ({ ...prev, roll: 0, pitch: 0 }));
-      return true;
-    }
-    return false;
-  };
-
-  const launchGameFromCalibration = () => {
-    const calibrated = recenterController();
-    if (!calibrated) {
-      setGameHud((prev) => ({
-        ...prev,
-        status: "Cannot calibrate yet. Keep the phone steady and send motion first.",
-      }));
-      return;
-    }
-    resetMatch();
-    setHostPhase("game");
-  };
-
-  const backToCalibration = () => {
-    setHostPhase("calibration");
-    controlRef.current.pendingSwing = null;
-    setGameHud((prev) => ({
-      ...prev,
-      status: "Calibrate the remote, then launch the game.",
-    }));
-  };
-
-  const handleManualRecenter = () => {
-    const calibrated = recenterController();
-    setGameHud((prev) => ({
-      ...prev,
-      status: calibrated
-        ? "Remote calibrated. Launch whenever you are ready."
-        : "No sensor sample yet. Keep the phone still for a second and retry.",
-    }));
-  };
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-slate-950 font-sans text-slate-100 selection:bg-emerald-500/30">
@@ -1474,68 +1300,27 @@ export default function Home() {
                   <div className="flex items-center gap-3">
                     <div
                       className={`h-3 w-3 animate-pulse rounded-full ${
-                        connected ? "bg-emerald-500" : "bg-rose-500"
+                        connected || packetsRef.current > 0 ? "bg-emerald-500" : "bg-rose-500"
                       }`}
                     />
                     <span className="text-sm font-bold uppercase tracking-wider text-slate-200">
-                      {connected ? "Connected" : "Disconnected"}
+                      {connected || packetsRef.current > 0 ? "Connected" : "Disconnected"}
                     </span>
                   </div>
                   <span className="font-mono text-xs text-slate-500">{session.slice(0, 4)}</span>
                 </div>
 
-                {permission !== "granted" ? (
-                  <span
-                    onClick={requestPermission}
-                    className="flex w-full cursor-pointer items-center justify-center rounded-xl bg-emerald-600 py-4 font-bold text-white shadow-lg shadow-emerald-900/20 transition-all active:scale-95 hover:bg-emerald-500"
-                  >
-                    ENABLE SENSORS
-                  </span>
-                ) : (
-                  <div className="space-y-6">
-                    <div className="text-center">
-                      <p className="mb-2 text-sm uppercase tracking-widest text-slate-400">
-                        Swing Force
-                      </p>
-                      <div className="h-4 overflow-hidden rounded-full border border-slate-700/50 bg-slate-800">
-                        <div
-                          className="h-full bg-gradient-to-r from-emerald-500 to-cyan-400 transition-all duration-75 ease-out"
-                          style={{ width: `${Math.min(phoneTelemetry.swing * 100, 100)}%` }}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4 text-center">
-                      <div className="rounded-xl border border-slate-700/30 bg-slate-800/50 p-3">
-                        <span className="block text-xs uppercase text-slate-500">Roll</span>
-                        <span className="font-mono text-lg text-emerald-300">
-                          {phoneTelemetry.roll.toFixed(1)}
-                        </span>
-                      </div>
-                      <div className="rounded-xl border border-slate-700/30 bg-slate-800/50 p-3">
-                        <span className="block text-xs uppercase text-slate-500">Pitch</span>
-                        <span className="font-mono text-lg text-emerald-300">
-                          {phoneTelemetry.pitch.toFixed(1)}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                )}
+                <div className="mb-4 aspect-[4/3] w-full overflow-hidden rounded-2xl border-2 border-slate-600">
+                  <CameraController onPacket={handlePhonePacket} />
+                </div>
+                
+                <p className="text-center text-xs text-slate-400">
+                  Point camera at a distinct object (e.g. green cap). Tap it on screen to track.
+                </p>
               </div>
 
-              {/* Big Recenter Button */}
-              <button
-                onClick={handleManualRecenter}
-                className="flex w-full flex-col items-center gap-1 rounded-3xl border border-slate-600 bg-slate-800 py-8 text-xl font-bold text-slate-200 shadow-xl transition-all active:scale-95 hover:bg-slate-700"
-              >
-                <span>RECENTER</span>
-                <span className="text-xs font-normal uppercase tracking-wide text-slate-400">
-                  Hold Flat & Still
-                </span>
-              </button>
-
               <p className="px-6 text-center text-xs text-slate-500">
-                Keep screen on. Swing phone like a racket.
+                Packets sent: {packetStats.packets}
               </p>
             </div>
           )}
@@ -1544,7 +1329,31 @@ export default function Home() {
           {role === "host" && (
             <>
               {/* LOBBY PHASE: QR Code */}
-              {!connected && (
+              {hostPhase === "calibration" && !inputSource && (
+                <div className="flex flex-col gap-6 text-center">
+                   <h2 className="text-2xl font-bold text-white">Choose Input Method</h2>
+                   <div className="flex gap-4">
+                      <button 
+                        onClick={() => setInputSource("pc")}
+                        className="rounded-2xl border border-slate-700 bg-slate-900 p-8 hover:bg-slate-800 transition-colors"
+                      >
+                        <div className="text-4xl mb-2">💻</div>
+                        <span className="font-bold">This Computer</span>
+                        <p className="text-xs text-slate-500 mt-2">Use webcam attached to this PC</p>
+                      </button>
+                      <button 
+                        onClick={() => setInputSource("phone")}
+                        className="rounded-2xl border border-slate-700 bg-slate-900 p-8 hover:bg-slate-800 transition-colors"
+                      >
+                        <div className="text-4xl mb-2">📱</div>
+                        <span className="font-bold">Phone Remote</span>
+                        <p className="text-xs text-slate-500 mt-2">Scan QR code to use phone</p>
+                      </button>
+                   </div>
+                </div>
+              )}
+
+              {hostPhase === "calibration" && inputSource === "phone" && !connected && (
                 <div className="flex w-full max-w-2xl flex-col items-center gap-8 rounded-3xl border border-slate-700 bg-slate-900/80 p-8 shadow-2xl backdrop-blur md:flex-row">
                   <div className="shrink-0 rounded-xl bg-white p-4 shadow-inner">
                     {qrDataUrl ? (
@@ -1587,22 +1396,17 @@ export default function Home() {
               )}
 
               {/* CALIBRATION PHASE */}
-              {connected && hostPhase === "calibration" && (
+              {hostPhase === "calibration" && (inputSource === "pc" || connected) && (
                 <div className="grid w-full max-w-4xl gap-6">
-                  <div className="flex animate-in slide-in-from-bottom-4 items-center justify-center gap-3 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 font-medium text-emerald-300 fade-in">
-                    <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
-                    Controller Connected
-                  </div>
-
-                  <div className="grid gap-4 md:grid-cols-3">
+                  <div className="grid gap-4 md:grid-cols-2">
                     {/* Step 1 */}
                     <div className="flex flex-col items-center rounded-2xl border border-slate-800 bg-slate-900/50 p-6 text-center">
                       <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full border border-slate-700 bg-slate-800 font-bold text-slate-400">
                         1
                       </div>
-                      <h3 className="mb-2 font-bold text-slate-200">Hold Neutral</h3>
+                      <h3 className="mb-2 font-bold text-slate-200">Prepare Object</h3>
                       <p className="text-sm text-slate-400">
-                        Hold your phone flat and steady, pointing at the screen.
+                        Find a distinct colored object (e.g. orange cap, green ball).
                       </p>
                     </div>
                     {/* Step 2 */}
@@ -1610,61 +1414,34 @@ export default function Home() {
                       <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full border border-slate-700 bg-slate-800 font-bold text-slate-400">
                         2
                       </div>
-                      <h3 className="mb-2 font-bold text-slate-200">Recenter</h3>
+                      <h3 className="mb-2 font-bold text-slate-200">Track It</h3>
                       <p className="text-sm text-slate-400">
-                        Press the recenter button on your phone or below.
+                        Tap the object on the video feed to start tracking.
                       </p>
-                      <button
-                        onClick={handleManualRecenter}
-                        className="mt-4 rounded-lg border border-slate-600 bg-slate-800 px-4 py-2 text-xs font-bold text-slate-200 transition-colors hover:bg-slate-700"
-                      >
-                        RECENTER NOW
-                      </button>
-                    </div>
-                    {/* Step 3 */}
-                    <div className="flex flex-col items-center rounded-2xl border border-slate-800 bg-slate-900/50 p-6 text-center">
-                      <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full border border-slate-700 bg-slate-800 font-bold text-slate-400">
-                        3
-                      </div>
-                      <h3 className="mb-2 font-bold text-slate-200">Check Motion</h3>
-                      <div className="mt-2 flex gap-4">
-                        <div className="text-center">
-                          <span className="block text-[10px] uppercase text-slate-500">Roll</span>
-                          <span className="font-mono text-emerald-400">
-                            {controlHud.roll.toFixed(1)}
-                          </span>
-                        </div>
-                        <div className="text-center">
-                          <span className="block text-[10px] uppercase text-slate-500">Pitch</span>
-                          <span className="font-mono text-emerald-400">
-                            {controlHud.pitch.toFixed(1)}
-                          </span>
-                        </div>
-                      </div>
                     </div>
                   </div>
+                  
+                  {/* PC Camera Calibration View */}
+                  {inputSource === "pc" && (
+                     <div className="mx-auto w-full max-w-sm rounded-2xl border border-slate-700 p-4 bg-slate-900">
+                        <CameraController onPacket={handleLocalPacket} />
+                     </div>
+                  )}
+                  
+                  {inputSource === "phone" && (
+                     <div className="text-center p-8">
+                        <p className="text-emerald-400 animate-pulse font-bold">Waiting for tracking data from phone...</p>
+                        <p className="text-slate-500 text-sm mt-2">Perform calibration on the phone screen</p>
+                     </div>
+                  )}
 
                   <div className="flex justify-center pt-6">
                     <button
-                      onClick={launchGameFromCalibration}
-                      disabled={!canLaunchFromCalibration}
+                      onClick={() => setHostPhase("game")}
                       className="group relative rounded-full bg-emerald-500 px-12 py-4 text-xl font-black text-slate-950 transition-all hover:scale-105 hover:bg-emerald-400 hover:shadow-[0_0_40px_-10px_rgba(16,185,129,0.5)] disabled:bg-slate-800 disabled:text-slate-500 disabled:hover:scale-100 disabled:hover:shadow-none"
                     >
                       <span className="relative z-10 flex items-center gap-2">
                         START MATCH
-                        <svg
-                          className="h-5 w-5 transition-transform group-enabled:translate-x-1"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={3}
-                            d="M14 5l7 7m0 0l-7 7m7-7H3"
-                          />
-                        </svg>
                       </span>
                     </button>
                   </div>
@@ -1672,11 +1449,18 @@ export default function Home() {
               )}
 
               {/* GAME PHASE */}
-              {connected && hostPhase === "game" && (
+              {hostPhase === "game" && (
                 <div className="relative flex h-full w-full flex-col">
                   {/* Canvas Container */}
                   <div className="relative flex-1 overflow-hidden bg-black shadow-2xl">
                     <div ref={renderMountRef} className="absolute inset-0 h-full w-full" />
+
+                    {/* PC Camera PIP */}
+                    {inputSource === "pc" && (
+                        <div className="absolute right-4 top-4 z-50 w-48 rounded-lg border-2 border-slate-700 bg-black shadow-xl overflow-hidden opacity-80 hover:opacity-100 transition-opacity">
+                            <CameraController onPacket={handleLocalPacket} />
+                        </div>
+                    )}
 
                     {/* Top HUD Overlay */}
                     <div className="pointer-events-none absolute left-0 right-0 top-0 flex items-start justify-between p-6">
@@ -1730,13 +1514,14 @@ export default function Home() {
                           </div>
                           <div className="h-8 w-px bg-slate-700/50" />
                           <div className="flex flex-col">
-                            <span className="text-[10px] uppercase text-slate-400">Swing</span>
-                            <div className="mt-1 h-2 w-24 overflow-hidden rounded-full bg-slate-700">
-                              <div
-                                className="h-full bg-cyan-400 transition-all duration-75"
-                                style={{ width: `${Math.min(controlHud.swing * 100, 100)}%` }}
-                              />
-                            </div>
+                            <span className="text-[10px] uppercase text-slate-400">Input</span>
+                            <span
+                              className={`font-mono text-sm font-bold ${
+                                connected || inputSource === "pc" ? "text-emerald-400" : "text-rose-400"
+                              }`}
+                            >
+                              {connected || inputSource === "pc" ? "Live" : "No Signal"}
+                            </span>
                           </div>
                         </div>
                       </div>
@@ -1752,13 +1537,7 @@ export default function Home() {
                           </button>
                         )}
                         <button
-                          onClick={handleManualRecenter}
-                          className="rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2 text-xs font-bold text-slate-300 transition-colors backdrop-blur hover:bg-slate-700/80"
-                        >
-                          RECENTER
-                        </button>
-                        <button
-                          onClick={backToCalibration}
+                          onClick={() => setHostPhase("calibration")}
                           className="rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2 text-xs font-bold text-slate-300 transition-colors backdrop-blur hover:bg-slate-700/80"
                         >
                           EXIT
