@@ -51,28 +51,23 @@ type SwingPacket = {
 type SwingAxis = "alpha" | "beta" | "gamma";
 
 type ControlState = {
-  roll: number;
-  pitch: number;
-  yaw: number;
-  swingMeter: number;
-  pendingSwing: SwingPacket | null;
-  lastSwingAt: number;
-  lastSeq: number;
-  neutralReady: boolean;
-  neutralRoll: number;
-  neutralPitch: number;
-  neutralYaw: number;
+  // Orientation
+  quaternion: THREE.Quaternion; // Current relative orientation
+  calibrationQuaternion: THREE.Quaternion; // Inverse of neutral pose
+  calibrated: boolean;
+  
+  // Visual/Physics Euler
   racketRoll: number;
   racketPitch: number;
   racketYaw: number;
-  lastAccelMag: number;
-  swingPrimed: boolean;
-  swingPrimeAxis: SwingAxis | null;
-  swingPrimeSign: number;
-  swingPrimedAt: number;
-  swingForwardRate: number;
-  swingSideRate: number;
-  swingLiftRate: number;
+
+  // Swing
+  angularVelocity: number;
+  pendingSwing: SwingPacket | null;
+  lastSwingTime: number;
+  
+  // Internal
+  lastSeq: number;
 };
 
 type AvatarSim = {
@@ -150,18 +145,11 @@ const CPU_SPEED = 7.4;
 const RACKET_REACH_X = 1.05;
 const HIT_Y_MIN = 0.35;
 const HIT_Y_MAX = 2.8;
-
 const SWING_DURATION = 0.32;
 const SWING_COOLDOWN = 0.16;
-const SWING_TRIGGER = 0.5;
+const SWING_THRESHOLD = 5.0; // Radians per second
 const SWING_REARM_MS = 250;
-const SWING_PRIME_RATE = 82;
-const SWING_RELEASE_RATE = 128;
-const SWING_PRIME_TIMEOUT_MS = 850;
-const ROLL_RANGE_DEG = 34;
-const PITCH_RANGE_DEG = 46;
-const YAW_RANGE_DEG = 60;
-const ORIENTATION_SMOOTHING = 0.34;
+const ORIENTATION_SMOOTHING = 0.25;
 
 const CONNECTION_TIMEOUT_MS = 1200;
 const POINTS_TO_WIN = 7;
@@ -202,157 +190,74 @@ function getRawYaw(sample: MotionSample | null): number | null {
   return typeof alpha === "number" && Number.isFinite(alpha) ? alpha : null;
 }
 
-function shortestAngleDelta(fromDeg: number, toDeg: number) {
-  let delta = fromDeg - toDeg;
-  while (delta > 180) delta -= 360;
-  while (delta < -180) delta += 360;
-  return delta;
-}
+// Reusable 3D objects to avoid GC
+const _qDevice = new THREE.Quaternion();
+const _qCalib = new THREE.Quaternion();
+const _qRel = new THREE.Quaternion();
+const _euler = new THREE.Euler();
+const _deg2rad = Math.PI / 180;
 
-function analyzeSwing(sample: MotionSample | null, previousAccelMagnitude = 9.8): {
-  strength: number;
-  accelMagnitude: number;
-  accelBurst: number;
-  rotationBurst: number;
-  primaryAxis: SwingAxis;
-  primaryRate: number;
-  sideRate: number;
-  liftRate: number;
-} {
-  const rate = sample?.rotationRate;
-  const gravity = sample?.accelerationIncludingGravity;
-
-  const alpha = typeof rate?.alpha === "number" && Number.isFinite(rate.alpha) ? rate.alpha : 0;
-  const beta = typeof rate?.beta === "number" && Number.isFinite(rate.beta) ? rate.beta : 0;
-  const gamma = typeof rate?.gamma === "number" && Number.isFinite(rate.gamma) ? rate.gamma : 0;
-  const gyroMagnitude = Math.sqrt(alpha ** 2 + beta ** 2 + gamma ** 2);
-  const rotationBurst = clamp((gyroMagnitude - 30) / 250, 0, 1);
-
-  const axes: Array<{ axis: SwingAxis; value: number }> = [
-    { axis: "alpha", value: alpha },
-    { axis: "beta", value: beta },
-    { axis: "gamma", value: gamma },
-  ];
-  axes.sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
-  const primaryAxis = axes[0]?.axis ?? "beta";
-  const primaryRate = axes[0]?.value ?? 0;
-
-  const gx = typeof gravity?.x === "number" && Number.isFinite(gravity.x) ? gravity.x : 0;
-  const gy = typeof gravity?.y === "number" && Number.isFinite(gravity.y) ? gravity.y : 0;
-  const gz = typeof gravity?.z === "number" && Number.isFinite(gravity.z) ? gravity.z : 0;
-  const gravityMagnitude = Math.sqrt(gx ** 2 + gy ** 2 + gz ** 2);
-  const jerk = Math.abs(gravityMagnitude - previousAccelMagnitude);
-  const accelBurst = clamp((jerk - 0.55) / 4.9, 0, 1);
-
-  return {
-    strength: clamp(rotationBurst * 0.72 + accelBurst * 0.46, 0, 1),
-    accelMagnitude: gravityMagnitude,
-    accelBurst,
-    rotationBurst,
-    primaryAxis,
-    primaryRate,
-    sideRate: gamma,
-    liftRate: -beta,
-  };
+function getDeviceQuaternion(alpha: number, beta: number, gamma: number, target: THREE.Quaternion) {
+  // Convert device orientation (degrees) to quaternion
+  // ZXY order is often used for device orientation, but YXZ works well for phone-forward
+  _euler.set(beta * _deg2rad, alpha * _deg2rad, -gamma * _deg2rad, 'YXZ');
+  target.setFromEuler(_euler);
 }
 
 function updateControlFromSample(control: ControlState, sample: MotionSample | null, sampleTime: number) {
-  const rawRoll = getRawRoll(sample);
-  const rawPitch = getRawPitch(sample);
-  const rawYaw = getRawYaw(sample);
+  const rawAlpha = getRawYaw(sample);
+  const rawBeta = getRawPitch(sample);
+  const rawGamma = getRawRoll(sample);
 
-  if (
-    rawRoll !== null &&
-    rawPitch !== null &&
-    (Number.isNaN(rawRoll) || Number.isNaN(rawPitch) || !Number.isFinite(rawRoll) || !Number.isFinite(rawPitch))
-  ) {
-    return;
-  }
+  // 1. Update Orientation
+  if (rawAlpha !== null && rawBeta !== null && rawGamma !== null) {
+    // Get current raw rotation
+    getDeviceQuaternion(rawAlpha, rawBeta, rawGamma, _qDevice);
 
-  if (!control.neutralReady && rawRoll !== null && rawPitch !== null) {
-    control.neutralReady = true;
-    control.neutralRoll = rawRoll;
-    control.neutralPitch = rawPitch;
-    control.neutralYaw = rawYaw ?? 0;
-  }
-
-  if (control.neutralReady && rawRoll !== null && rawPitch !== null) {
-    const normalizedRoll = clamp((rawRoll - control.neutralRoll) / ROLL_RANGE_DEG, -1, 1);
-    const normalizedPitch = clamp((rawPitch - control.neutralPitch) / PITCH_RANGE_DEG, -1, 1);
-    const rawYawDelta = rawYaw == null ? 0 : shortestAngleDelta(rawYaw, control.neutralYaw);
-    const normalizedYaw = clamp(rawYawDelta / YAW_RANGE_DEG, -1, 1);
-    control.roll = THREE.MathUtils.lerp(control.roll, normalizedRoll, ORIENTATION_SMOOTHING);
-    control.pitch = THREE.MathUtils.lerp(control.pitch, normalizedPitch, ORIENTATION_SMOOTHING);
-    control.yaw = THREE.MathUtils.lerp(control.yaw, normalizedYaw, ORIENTATION_SMOOTHING);
-
-    control.racketRoll = THREE.MathUtils.degToRad(clamp(rawRoll - control.neutralRoll, -120, 120));
-    control.racketPitch = THREE.MathUtils.degToRad(clamp(rawPitch - control.neutralPitch, -130, 130));
-    control.racketYaw = THREE.MathUtils.degToRad(clamp(rawYawDelta, -140, 140));
-  }
-
-  const swing = analyzeSwing(sample, control.lastAccelMag);
-  control.lastAccelMag = THREE.MathUtils.lerp(control.lastAccelMag, swing.accelMagnitude, 0.35);
-  control.swingForwardRate = THREE.MathUtils.lerp(control.swingForwardRate, Math.abs(swing.primaryRate), 0.18);
-  control.swingSideRate = THREE.MathUtils.lerp(control.swingSideRate, swing.sideRate, 0.24);
-  control.swingLiftRate = THREE.MathUtils.lerp(control.swingLiftRate, swing.liftRate, 0.24);
-
-  if (control.swingPrimed && sampleTime - control.swingPrimedAt > SWING_PRIME_TIMEOUT_MS) {
-    control.swingPrimed = false;
-    control.swingPrimeAxis = null;
-    control.swingPrimeSign = 0;
-  }
-
-  const primaryAbs = Math.abs(swing.primaryRate);
-  const primarySign = Math.sign(swing.primaryRate || 0);
-
-  if (!control.swingPrimed) {
-    const directFlick =
-      primaryAbs > SWING_RELEASE_RATE * 1.18 &&
-      swing.rotationBurst > 0.74 &&
-      swing.accelBurst > 0.42;
-    if (directFlick) {
-      control.swingMeter = Math.max(control.swingMeter * 0.42, swing.strength * 0.95);
-      control.swingForwardRate = primaryAbs;
-      control.swingSideRate = swing.sideRate;
-      control.swingLiftRate = swing.liftRate;
-      return;
+    // If not calibrated or auto-calibrating (first frame), set calibration
+    if (!control.calibrated) {
+      control.calibrated = true;
+      // Calibration is the inverse of the current rotation (makes current pose "identity")
+      control.calibrationQuaternion.copy(_qDevice).invert();
     }
 
-    if (primaryAbs > SWING_PRIME_RATE) {
-      control.swingPrimed = true;
-      control.swingPrimeAxis = swing.primaryAxis;
-      control.swingPrimeSign = primarySign === 0 ? 1 : primarySign;
-      control.swingPrimedAt = sampleTime;
+    // Apply calibration: Q_rel = Q_calib * Q_device
+    _qRel.multiplyQuaternions(control.calibrationQuaternion, _qDevice);
+    
+    // Smoothly interpolate current state towards new sample
+    control.quaternion.slerp(_qRel, ORIENTATION_SMOOTHING);
+
+    // Extract Euler angles for game physics (Roll/Pitch/Yaw)
+    // Order YXZ: Yaw (Y) -> Pitch (X) -> Roll (Z) matches tennis mechanics well
+    _euler.setFromQuaternion(control.quaternion, 'YXZ');
+    
+    control.racketYaw = -_euler.y;   // Left/Right aiming
+    control.racketPitch = _euler.x;  // Up/Down tilt
+    control.racketRoll = -_euler.z;  // Wrist twist (spin)
+  }
+
+  // 2. Detect Swing via Angular Velocity
+  const rate = sample?.rotationRate;
+  if (rate) {
+    const alphaRad = (rate.alpha || 0) * _deg2rad;
+    const betaRad = (rate.beta || 0) * _deg2rad;
+    const gammaRad = (rate.gamma || 0) * _deg2rad;
+    
+    // Magnitude of angular velocity vector
+    const angularSpeed = Math.sqrt(alphaRad**2 + betaRad**2 + gammaRad**2);
+    control.angularVelocity = angularSpeed;
+
+    // Trigger swing if threshold exceeded and cooldown passed
+    if (angularSpeed > SWING_THRESHOLD && (sampleTime - control.lastSwingTime > SWING_REARM_MS)) {
+      control.lastSwingTime = sampleTime;
+      control.pendingSwing = {
+        strength: clamp(angularSpeed / 10, 0.3, 1.0), // Normalize strength
+        roll: control.racketRoll,
+        pitch: control.racketPitch,
+        at: sampleTime,
+      };
     }
-    control.swingMeter = Math.max(control.swingMeter * 0.8, swing.strength * 0.42);
-    return;
   }
-
-  const sameAxis = swing.primaryAxis === control.swingPrimeAxis;
-  const reversed = primarySign !== 0 && primarySign === -control.swingPrimeSign;
-  const releaseReady =
-    primaryAbs > SWING_RELEASE_RATE &&
-    (sameAxis || swing.accelBurst > 0.58) &&
-    (reversed || swing.accelBurst > 0.66);
-
-  if (releaseReady) {
-    const rateBonus = clamp((primaryAbs - SWING_RELEASE_RATE) / 220, 0, 0.34);
-    const releaseStrength = clamp(
-      swing.rotationBurst * 0.68 + swing.accelBurst * 0.36 + rateBonus,
-      0,
-      1,
-    );
-    control.swingMeter = Math.max(control.swingMeter * 0.35, releaseStrength);
-    control.swingForwardRate = primaryAbs;
-    control.swingSideRate = swing.sideRate;
-    control.swingLiftRate = swing.liftRate;
-    control.swingPrimed = false;
-    control.swingPrimeAxis = null;
-    control.swingPrimeSign = 0;
-    return;
-  }
-
-  control.swingMeter = Math.max(control.swingMeter * 0.86, swing.strength * 0.55);
 }
 
 function opponent(owner: ScoreOwner): ScoreOwner {
@@ -596,28 +501,16 @@ export default function Home() {
   const sendingRef = useRef(false);
   const packetsRef = useRef(0);
   const controlRef = useRef<ControlState>({
-    roll: 0,
-    pitch: 0,
-    yaw: 0,
-    swingMeter: 0,
-    pendingSwing: null,
-    lastSwingAt: 0,
-    lastSeq: -1,
-    neutralReady: false,
-    neutralRoll: 0,
-    neutralPitch: 0,
-    neutralYaw: 0,
+    quaternion: new THREE.Quaternion(),
+    calibrationQuaternion: new THREE.Quaternion(),
+    calibrated: false,
     racketRoll: 0,
     racketPitch: 0,
     racketYaw: 0,
-    lastAccelMag: 9.8,
-    swingPrimed: false,
-    swingPrimeAxis: null,
-    swingPrimeSign: 0,
-    swingPrimedAt: 0,
-    swingForwardRate: 0,
-    swingSideRate: 0,
-    swingLiftRate: 0,
+    angularVelocity: 0,
+    pendingSwing: null,
+    lastSwingTime: 0,
+    lastSeq: -1,
   });
   const connectedRef = useRef(false);
   const simRef = useRef<SimState>(createSimState());
@@ -702,25 +595,10 @@ export default function Home() {
     control.lastSeq = latest.seq;
 
     updateControlFromSample(control, latest.sample, latest.t);
-    setNeutralReady(control.neutralReady);
+    setNeutralReady(control.calibrated);
 
-    if (control.swingMeter > SWING_TRIGGER && latest.t - control.lastSwingAt > SWING_REARM_MS) {
-      const dynamicRoll = clamp(control.roll * 0.7 + control.swingSideRate / 210, -1, 1);
-      const dynamicPitch = clamp(control.pitch * 0.64 + control.swingLiftRate / 230, -1, 1);
-      const dynamicStrength = clamp(
-        control.swingMeter * 1.05 + clamp((control.swingForwardRate - 120) / 380, 0, 0.32),
-        0.2,
-        0.86,
-      );
-      control.pendingSwing = {
-        strength: dynamicStrength,
-        roll: dynamicRoll,
-        pitch: dynamicPitch,
-        at: latest.t,
-      };
-      control.lastSwingAt = latest.t;
-      control.swingForwardRate = 0;
-    }
+    // We don't set pendingSwing here anymore, it's done inside updateControlFromSample
+    // based on angular velocity.
   }, [latest]);
 
   useEffect(() => {
@@ -799,14 +677,18 @@ export default function Home() {
       const sample = latestRef.current;
       const roll = getRawRoll(sample);
       const pitch = getRawPitch(sample);
-      const swing = analyzeSwing(sample, previewAccelMag);
-      previewAccelMag = swing.accelMagnitude;
+      
+      // Simple angular speed preview
+      const rate = sample?.rotationRate;
+      const speed = rate 
+        ? Math.sqrt((rate.alpha||0)**2 + (rate.beta||0)**2 + (rate.gamma||0)**2) * _deg2rad 
+        : 0;
 
       setPhoneTelemetry((prev) => ({
         ...prev,
         roll: roll == null ? prev.roll : clamp(roll / 45, -1, 1),
         pitch: pitch == null ? prev.pitch : clamp((pitch - 20) / 65, -1, 1),
-        swing: swing.strength,
+        swing: clamp(speed / 10, 0, 1),
       }));
     };
 
@@ -890,28 +772,16 @@ export default function Home() {
 
     simRef.current = createSimState();
     controlRef.current = {
-      roll: 0,
-      pitch: 0,
-      yaw: 0,
-      swingMeter: 0,
-      pendingSwing: null,
-      lastSwingAt: 0,
-      lastSeq: -1,
-      neutralReady: false,
-      neutralRoll: 0,
-      neutralPitch: 0,
-      neutralYaw: 0,
+      quaternion: new THREE.Quaternion(),
+      calibrationQuaternion: new THREE.Quaternion(),
+      calibrated: false,
       racketRoll: 0,
       racketPitch: 0,
       racketYaw: 0,
-      lastAccelMag: 9.8,
-      swingPrimed: false,
-      swingPrimeAxis: null,
-      swingPrimeSign: 0,
-      swingPrimedAt: 0,
-      swingForwardRate: 0,
-      swingSideRate: 0,
-      swingLiftRate: 0,
+      angularVelocity: 0,
+      pendingSwing: null,
+      lastSwingTime: 0,
+      lastSeq: -1,
     };
     setGameHud({
       player: 0,
@@ -1112,9 +982,9 @@ export default function Home() {
         status: match.status,
       });
       setControlHud({
-        roll: control.roll,
-        pitch: control.pitch,
-        swing: control.swingMeter,
+        roll: control.racketRoll,
+        pitch: control.racketPitch,
+        swing: control.angularVelocity,
       });
     };
 
@@ -1170,10 +1040,12 @@ export default function Home() {
       const baseZ = side === "player" ? -0.82 : 0.82;
       const sweepZ = side === "player" ? 2.25 : -2.25;
 
+      // Simplified visual rotation
       visual.swingPivot.rotation.set(
-        0.25 + progress * 0.55 + avatar.pitch * 0.25,
-        side === "player" ? 0.2 : -0.2,
-        baseZ + sweepZ * progress + avatar.roll * (side === "player" ? 0.45 : -0.45),
+        0.25 + progress * 0.55 + avatar.pitch * 0.4, // Pitch influences forward tilt
+        // Y rotation (yaw) modified by user input and swing progress
+        (side === "player" ? 0.2 : -0.2) + avatar.roll * 0.5,
+        baseZ + sweepZ * progress
       );
 
       if (avatar.flash > 0) {
@@ -1195,8 +1067,6 @@ export default function Home() {
 
       const match = sim.match;
       const control = controlRef.current;
-
-      control.swingMeter = Math.max(0, control.swingMeter - dt * 1.3);
 
       if (
         control.pendingSwing &&
@@ -1491,18 +1361,11 @@ export default function Home() {
     resetSimState(simRef.current);
     const control = controlRef.current;
     control.pendingSwing = null;
-    control.swingMeter = 0;
-    control.lastSwingAt = 0;
-    control.yaw = 0;
+    control.angularVelocity = 0;
+    control.lastSwingTime = 0;
     control.racketRoll = 0;
     control.racketPitch = 0;
     control.racketYaw = 0;
-    control.swingPrimed = false;
-    control.swingPrimeAxis = null;
-    control.swingPrimeSign = 0;
-    control.swingForwardRate = 0;
-    control.swingSideRate = 0;
-    control.swingLiftRate = 0;
     setGameHud({
       player: 0,
       cpu: 0,
@@ -1522,28 +1385,22 @@ export default function Home() {
   const recenterController = () => {
     const control = controlRef.current;
     const sample = latest?.sample ?? null;
-    const roll = getRawRoll(sample);
-    const pitch = getRawPitch(sample);
-    const yaw = getRawYaw(sample);
-    if (roll !== null && pitch !== null) {
-      control.neutralRoll = roll;
-      control.neutralPitch = pitch;
-      if (yaw !== null) {
-        control.neutralYaw = yaw;
-      }
-      control.neutralReady = true;
-      control.roll = 0;
-      control.pitch = 0;
-      control.yaw = 0;
+    
+    // Grab current orientation
+    const rawAlpha = getRawYaw(sample);
+    const rawBeta = getRawPitch(sample);
+    const rawGamma = getRawRoll(sample);
+
+    if (rawAlpha !== null && rawBeta !== null && rawGamma !== null) {
+      getDeviceQuaternion(rawAlpha, rawBeta, rawGamma, _qDevice);
+      // Recalibrate: Set neutral to current
+      control.calibrationQuaternion.copy(_qDevice).invert();
+      control.calibrated = true;
+      
+      // Reset control values
       control.racketRoll = 0;
       control.racketPitch = 0;
       control.racketYaw = 0;
-      control.swingPrimed = false;
-      control.swingPrimeAxis = null;
-      control.swingPrimeSign = 0;
-      control.swingForwardRate = 0;
-      control.swingSideRate = 0;
-      control.swingLiftRate = 0;
       setNeutralReady(true);
       setControlHud((prev) => ({ ...prev, roll: 0, pitch: 0 }));
       return true;
