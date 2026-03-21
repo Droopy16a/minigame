@@ -138,7 +138,7 @@ const NET_HEIGHT = 1.0;
 const BALL_RADIUS = 0.14;
 const GRAVITY = 9.8;
 const GROUND_BOUNCE = 0.72;
-const AIR_DRAG = 0.014;
+const AIR_DRAG = 0.005;
 
 const PLAYER_SPEED = 8.3;
 const CPU_SPEED = 7.4;
@@ -352,8 +352,8 @@ function strikeBall(
     5.4,
   );
   const lift =
-    (isServe ? 3.8 : 3.2) +
-    effectivePower * (isServe ? 1.35 : 1.1) +
+    (isServe ? 4.2 : 3.8) +
+    effectivePower * (isServe ? 1.4 : 1.25) +
     clamp(-pitch * 1.05, -0.75, 1.05);
 
   sim.ballVel.set(lateral, lift, toward * forward);
@@ -1460,7 +1460,11 @@ export default function Home() {
           </header>
         )}
 
-        <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col items-center justify-center p-4">
+        <div
+          className={`flex w-full flex-1 flex-col items-center justify-center ${
+            role === "host" && hostPhase === "game" ? "h-full p-0" : "mx-auto max-w-5xl p-4"
+          }`}
+        >
           {/* --- PHONE CONTROLLER VIEW --- */}
           {role === "phone" && (
             <div className="flex h-full w-full max-w-md flex-col justify-center gap-6">
@@ -1671,7 +1675,7 @@ export default function Home() {
               {connected && hostPhase === "game" && (
                 <div className="relative flex h-full w-full flex-col">
                   {/* Canvas Container */}
-                  <div className="relative flex-1 overflow-hidden rounded-2xl border border-slate-800 bg-black shadow-2xl">
+                  <div className="relative flex-1 overflow-hidden bg-black shadow-2xl">
                     <div ref={renderMountRef} className="absolute inset-0 h-full w-full" />
 
                     {/* Top HUD Overlay */}
