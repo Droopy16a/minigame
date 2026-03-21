@@ -626,7 +626,7 @@ export default function Home() {
   }, [connected]);
 
   useEffect(() => {
-    if (!latest?.sample) return;
+    if (!latest?.packet) return;
 
     const control = controlRef.current;
     if (latest.seq === control.lastSeq) return;
