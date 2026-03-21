@@ -747,7 +747,7 @@ export default function Home() {
       }
     };
 
-    const interval = window.setInterval(poll, 40);
+    const interval = window.setInterval(poll, 16);
     poll();
 
     return () => {
@@ -963,7 +963,7 @@ export default function Home() {
       } finally {
         sendingRef.current = false;
       }
-    }, 33);
+    }, 16);
 
     return () => {
       mounted = false;
@@ -1683,255 +1683,331 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 py-10">
-        <header className="flex flex-col gap-2">
-          <p className="text-xs uppercase tracking-[0.28em] text-cyan-300/70">Pocket Racket</p>
-          <h1 className="text-3xl font-semibold">3D Wii-Style Phone Tennis</h1>
-          <p className="text-sm text-slate-300/85">
-            First-person court view with phone-driven Wii-style tennis controls.
-          </p>
-        </header>
+    <main className="relative min-h-screen overflow-hidden bg-slate-950 font-sans text-slate-100 selection:bg-emerald-500/30">
+      {/* Background Ambience */}
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-black" />
+      <div className="pointer-events-none absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 mix-blend-soft-light" />
 
-        <div className="grid gap-6 xl:grid-cols-[2fr,1fr]">
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/65 p-6">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <p className="text-sm text-slate-400">
-                  Role: <span className="text-slate-100">{role === "host" ? "Host" : "Phone"}</span>
-                </p>
-                <p className="text-sm text-slate-400">
-                  Session: <span className="text-slate-100">{session || "..."}</span>
-                </p>
+      {/* Main Container */}
+      <div className="relative z-10 flex h-screen max-h-screen flex-col">
+        {/* Game Title Header - Hidden during gameplay */}
+        {(role !== "host" || hostPhase !== "game") && (
+          <header className="flex-none p-6 text-center">
+            <h1 className="bg-gradient-to-br from-emerald-400 to-cyan-500 bg-clip-text text-4xl font-black italic tracking-tighter text-transparent drop-shadow-sm md:text-6xl">
+              POCKET RACKET
+            </h1>
+            <p className="mt-2 text-sm font-medium uppercase tracking-wide text-slate-400">
+              Local Multiplayer Tennis
+            </p>
+          </header>
+        )}
+
+        <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col items-center justify-center p-4">
+          {/* --- PHONE CONTROLLER VIEW --- */}
+          {role === "phone" && (
+            <div className="flex h-full w-full max-w-md flex-col justify-center gap-6">
+              {/* Status Card */}
+              <div className="rounded-3xl border border-slate-700 bg-slate-900/80 p-6 shadow-2xl backdrop-blur">
+                <div className="mb-6 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`h-3 w-3 animate-pulse rounded-full ${
+                        connected ? "bg-emerald-500" : "bg-rose-500"
+                      }`}
+                    />
+                    <span className="text-sm font-bold uppercase tracking-wider text-slate-200">
+                      {connected ? "Connected" : "Disconnected"}
+                    </span>
+                  </div>
+                  <span className="font-mono text-xs text-slate-500">{session.slice(0, 4)}</span>
+                </div>
+
+                {permission !== "granted" ? (
+                  <span
+                    onClick={requestPermission}
+                    className="flex w-full cursor-pointer items-center justify-center rounded-xl bg-emerald-600 py-4 font-bold text-white shadow-lg shadow-emerald-900/20 transition-all active:scale-95 hover:bg-emerald-500"
+                  >
+                    ENABLE SENSORS
+                  </span>
+                ) : (
+                  <div className="space-y-6">
+                    <div className="text-center">
+                      <p className="mb-2 text-sm uppercase tracking-widest text-slate-400">
+                        Swing Force
+                      </p>
+                      <div className="h-4 overflow-hidden rounded-full border border-slate-700/50 bg-slate-800">
+                        <div
+                          className="h-full bg-gradient-to-r from-emerald-500 to-cyan-400 transition-all duration-75 ease-out"
+                          style={{ width: `${Math.min(phoneTelemetry.swing * 100, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 text-center">
+                      <div className="rounded-xl border border-slate-700/30 bg-slate-800/50 p-3">
+                        <span className="block text-xs uppercase text-slate-500">Roll</span>
+                        <span className="font-mono text-lg text-emerald-300">
+                          {phoneTelemetry.roll.toFixed(1)}
+                        </span>
+                      </div>
+                      <div className="rounded-xl border border-slate-700/30 bg-slate-800/50 p-3">
+                        <span className="block text-xs uppercase text-slate-500">Pitch</span>
+                        <span className="font-mono text-lg text-emerald-300">
+                          {phoneTelemetry.pitch.toFixed(1)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {role === "host" && (
-                <div className="flex items-center gap-2 rounded-full border border-slate-700/80 px-3 py-1 text-xs">
-                  <span
-                    className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-slate-500"}`}
-                  />
-                  {connected ? "Phone connected" : "Waiting for phone"}
-                </div>
-              )}
-            </div>
+              {/* Big Recenter Button */}
+              <button
+                onClick={handleManualRecenter}
+                className="flex w-full flex-col items-center gap-1 rounded-3xl border border-slate-600 bg-slate-800 py-8 text-xl font-bold text-slate-200 shadow-xl transition-all active:scale-95 hover:bg-slate-700"
+              >
+                <span>RECENTER</span>
+                <span className="text-xs font-normal uppercase tracking-wide text-slate-400">
+                  Hold Flat & Still
+                </span>
+              </button>
 
-            {role === "host" ? (
-              <div className="mt-4 space-y-4">
-                <div className="flex flex-wrap gap-4">
-                  <div className="h-36 w-36 rounded-xl bg-slate-800 p-2">
+              <p className="px-6 text-center text-xs text-slate-500">
+                Keep screen on. Swing phone like a racket.
+              </p>
+            </div>
+          )}
+
+          {/* --- HOST VIEW --- */}
+          {role === "host" && (
+            <>
+              {/* LOBBY PHASE: QR Code */}
+              {!connected && (
+                <div className="flex w-full max-w-2xl flex-col items-center gap-8 rounded-3xl border border-slate-700 bg-slate-900/80 p-8 shadow-2xl backdrop-blur md:flex-row">
+                  <div className="shrink-0 rounded-xl bg-white p-4 shadow-inner">
                     {qrDataUrl ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
                         src={qrDataUrl}
-                        alt="Session QR"
-                        className="h-full w-full rounded-lg bg-white p-2"
+                        alt="Join QR"
+                        className="h-48 w-48 object-contain opacity-90 mix-blend-multiply"
                       />
                     ) : (
-                      <div className="flex h-full w-full items-center justify-center text-xs text-slate-400">
-                        Generating QR...
-                      </div>
+                      <div className="h-48 w-48 animate-pulse rounded bg-slate-100" />
                     )}
                   </div>
-
-                  <div className="flex min-w-0 flex-1 flex-col gap-2 text-sm">
-                    <div className="rounded-lg bg-slate-800/70 p-2 break-all text-slate-200">
-                      {phoneUrl || "Preparing phone link..."}
+                  <div className="flex-1 space-y-6 text-center md:text-left">
+                    <div>
+                      <h2 className="mb-2 text-2xl font-bold text-white">Scan to Join</h2>
+                      <p className="leading-relaxed text-slate-400">
+                        Scan the QR code with your phone to connect it as your motion controller.
+                      </p>
                     </div>
-                    <div className="flex flex-wrap gap-2">
+                    <div className="break-all rounded-xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs text-slate-500">
+                      {phoneUrl || "Generating..."}
+                    </div>
+                    <div className="flex justify-center gap-3 md:justify-start">
                       <button
                         onClick={copyPhoneLink}
-                        disabled={!phoneUrl}
-                        className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 enabled:hover:bg-slate-800 disabled:opacity-40"
+                        className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-slate-300 transition-colors hover:bg-slate-700"
                       >
                         Copy Link
                       </button>
                       <button
                         onClick={() => window.open(phoneUrl, "_blank")}
-                        disabled={!phoneUrl}
-                        className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 enabled:hover:bg-slate-800 disabled:opacity-40"
+                        className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-slate-300 transition-colors hover:bg-slate-700"
                       >
-                        Open Phone View
+                        Open Here
                       </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* CALIBRATION PHASE */}
+              {connected && hostPhase === "calibration" && (
+                <div className="grid w-full max-w-4xl gap-6">
+                  <div className="flex animate-in slide-in-from-bottom-4 items-center justify-center gap-3 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 font-medium text-emerald-300 fade-in">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+                    Controller Connected
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-3">
+                    {/* Step 1 */}
+                    <div className="flex flex-col items-center rounded-2xl border border-slate-800 bg-slate-900/50 p-6 text-center">
+                      <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full border border-slate-700 bg-slate-800 font-bold text-slate-400">
+                        1
+                      </div>
+                      <h3 className="mb-2 font-bold text-slate-200">Hold Neutral</h3>
+                      <p className="text-sm text-slate-400">
+                        Hold your phone flat and steady, pointing at the screen.
+                      </p>
+                    </div>
+                    {/* Step 2 */}
+                    <div className="flex flex-col items-center rounded-2xl border border-slate-800 bg-slate-900/50 p-6 text-center">
+                      <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full border border-slate-700 bg-slate-800 font-bold text-slate-400">
+                        2
+                      </div>
+                      <h3 className="mb-2 font-bold text-slate-200">Recenter</h3>
+                      <p className="text-sm text-slate-400">
+                        Press the recenter button on your phone or below.
+                      </p>
                       <button
                         onClick={handleManualRecenter}
-                        className="rounded-lg border border-slate-600 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800"
+                        className="mt-4 rounded-lg border border-slate-600 bg-slate-800 px-4 py-2 text-xs font-bold text-slate-200 transition-colors hover:bg-slate-700"
                       >
-                        Recenter Motion
+                        RECENTER NOW
                       </button>
-                      {hostPhase === "calibration" ? (
-                        <button
-                          onClick={launchGameFromCalibration}
-                          disabled={!canLaunchFromCalibration}
-                          className="rounded-lg border border-cyan-600/70 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200 enabled:hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                    </div>
+                    {/* Step 3 */}
+                    <div className="flex flex-col items-center rounded-2xl border border-slate-800 bg-slate-900/50 p-6 text-center">
+                      <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full border border-slate-700 bg-slate-800 font-bold text-slate-400">
+                        3
+                      </div>
+                      <h3 className="mb-2 font-bold text-slate-200">Check Motion</h3>
+                      <div className="mt-2 flex gap-4">
+                        <div className="text-center">
+                          <span className="block text-[10px] uppercase text-slate-500">Roll</span>
+                          <span className="font-mono text-emerald-400">
+                            {controlHud.roll.toFixed(1)}
+                          </span>
+                        </div>
+                        <div className="text-center">
+                          <span className="block text-[10px] uppercase text-slate-500">Pitch</span>
+                          <span className="font-mono text-emerald-400">
+                            {controlHud.pitch.toFixed(1)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-center pt-6">
+                    <button
+                      onClick={launchGameFromCalibration}
+                      disabled={!canLaunchFromCalibration}
+                      className="group relative rounded-full bg-emerald-500 px-12 py-4 text-xl font-black text-slate-950 transition-all hover:scale-105 hover:bg-emerald-400 hover:shadow-[0_0_40px_-10px_rgba(16,185,129,0.5)] disabled:bg-slate-800 disabled:text-slate-500 disabled:hover:scale-100 disabled:hover:shadow-none"
+                    >
+                      <span className="relative z-10 flex items-center gap-2">
+                        START MATCH
+                        <svg
+                          className="h-5 w-5 transition-transform group-enabled:translate-x-1"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
                         >
-                          Calibrate & Launch
-                        </button>
-                      ) : (
-                        <>
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={3}
+                            d="M14 5l7 7m0 0l-7 7m7-7H3"
+                          />
+                        </svg>
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* GAME PHASE */}
+              {connected && hostPhase === "game" && (
+                <div className="relative flex h-full w-full flex-col">
+                  {/* Canvas Container */}
+                  <div className="relative flex-1 overflow-hidden rounded-2xl border border-slate-800 bg-black shadow-2xl">
+                    <div ref={renderMountRef} className="absolute inset-0 h-full w-full" />
+
+                    {/* Top HUD Overlay */}
+                    <div className="pointer-events-none absolute left-0 right-0 top-0 flex items-start justify-between p-6">
+                      {/* Player Score */}
+                      <div className="flex flex-col items-center rounded-2xl border border-emerald-500/20 bg-slate-900/40 p-4 shadow-lg backdrop-blur-md">
+                        <span className="mb-1 text-xs font-bold uppercase tracking-widest text-emerald-400">
+                          Player
+                        </span>
+                        <span className="font-mono text-5xl font-black leading-none text-white">
+                          {gameHud.player}
+                        </span>
+                      </div>
+
+                      {/* Center Status */}
+                      <div className="mt-2 rounded-full border border-slate-700/50 bg-slate-950/60 px-6 py-2 backdrop-blur">
+                        <span className="text-sm font-medium uppercase tracking-wide text-slate-200 animate-pulse">
+                          {gameHud.winner ? (
+                            <span
+                              className={
+                                gameHud.winner === "player" ? "text-emerald-400" : "text-rose-400"
+                              }
+                            >
+                              {gameHud.status}
+                            </span>
+                          ) : (
+                            gameHud.status
+                          )}
+                        </span>
+                      </div>
+
+                      {/* CPU Score */}
+                      <div className="flex flex-col items-center rounded-2xl border border-orange-500/20 bg-slate-900/40 p-4 shadow-lg backdrop-blur-md">
+                        <span className="mb-1 text-xs font-bold uppercase tracking-widest text-orange-400">
+                          CPU
+                        </span>
+                        <span className="font-mono text-5xl font-black leading-none text-white">
+                          {gameHud.cpu}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Bottom HUD Overlay */}
+                    <div className="pointer-events-none absolute bottom-0 left-0 right-0 flex items-end justify-between p-6">
+                      <div className="rounded-xl border border-slate-800/50 bg-slate-900/30 p-3 backdrop-blur">
+                        <div className="flex items-center gap-3">
+                          <div className="flex flex-col">
+                            <span className="text-[10px] uppercase text-slate-400">Rally</span>
+                            <span className="font-mono text-xl font-bold text-slate-200">
+                              {gameHud.rally}
+                            </span>
+                          </div>
+                          <div className="h-8 w-px bg-slate-700/50" />
+                          <div className="flex flex-col">
+                            <span className="text-[10px] uppercase text-slate-400">Swing</span>
+                            <div className="mt-1 h-2 w-24 overflow-hidden rounded-full bg-slate-700">
+                              <div
+                                className="h-full bg-cyan-400 transition-all duration-75"
+                                style={{ width: `${Math.min(controlHud.swing * 100, 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* In-Game Buttons (Pointer Events Enabled) */}
+                      <div className="pointer-events-auto flex gap-2">
+                        {gameHud.winner && (
                           <button
                             onClick={resetMatch}
-                            className="rounded-lg border border-cyan-600/70 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                            className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-lg transition-colors hover:bg-emerald-500"
                           >
-                            Reset Match
+                            PLAY AGAIN
                           </button>
-                          <button
-                            onClick={backToCalibration}
-                            className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800"
-                          >
-                            Back to Calibration
-                          </button>
-                        </>
-                      )}
+                        )}
+                        <button
+                          onClick={handleManualRecenter}
+                          className="rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2 text-xs font-bold text-slate-300 transition-colors backdrop-blur hover:bg-slate-700/80"
+                        >
+                          RECENTER
+                        </button>
+                        <button
+                          onClick={backToCalibration}
+                          className="rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2 text-xs font-bold text-slate-300 transition-colors backdrop-blur hover:bg-slate-700/80"
+                        >
+                          EXIT
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
-
-                {hostPhase === "calibration" ? (
-                  <>
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Connection</p>
-                        <p className="mt-2 text-sm text-slate-200">
-                          {connected ? "Phone telemetry streaming" : "Waiting for live packets"}
-                        </p>
-                        <p className="mt-1 text-xs text-slate-400">
-                          Launch unlocks once orientation data is received.
-                        </p>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Neutral Pose</p>
-                        <p className="mt-2 text-sm text-slate-200">
-                          {neutralReady ? "Calibrated" : "Not calibrated"}
-                        </p>
-                        <p className="mt-1 text-xs text-slate-400">
-                          Hold phone flat like a Wii Remote, then recenter.
-                        </p>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Live Motion</p>
-                        <p className="mt-2 text-sm text-slate-200">
-                          Roll {controlHud.roll.toFixed(2)} | Pitch {controlHud.pitch.toFixed(2)}
-                        </p>
-                        <p className="mt-1 text-xs text-slate-400">Swing {controlHud.swing.toFixed(2)}</p>
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-sm text-slate-300">
-                      <p className="font-medium text-slate-100">Calibration flow</p>
-                      <ol className="mt-2 list-decimal space-y-1 pl-4 text-slate-300">
-                        <li>Connect the phone and allow sensor access.</li>
-                        <li>Hold still in neutral position and press Recenter Motion.</li>
-                        <li>Press Calibrate & Launch to start the 3D match.</li>
-                      </ol>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div
-                      ref={renderMountRef}
-                      className="aspect-[16/9] w-full overflow-hidden rounded-xl border border-slate-800 bg-slate-950"
-                    />
-
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">You</p>
-                        <p className="mt-1 text-2xl font-semibold text-emerald-300">{gameHud.player}</p>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">CPU</p>
-                        <p className="mt-1 text-2xl font-semibold text-orange-300">{gameHud.cpu}</p>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Rally</p>
-                        <p className="mt-1 text-2xl font-semibold text-slate-100">{gameHud.rally}</p>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Controller</p>
-                        <p className="mt-1 text-sm text-slate-200">
-                          Roll {controlHud.roll.toFixed(2)} | Pitch {controlHud.pitch.toFixed(2)}
-                        </p>
-                        <p className="text-xs text-slate-400">Swing {controlHud.swing.toFixed(2)}</p>
-                      </div>
-                    </div>
-
-                    {gameHud.winner && (
-                      <div
-                        className={`rounded-xl border p-3 text-sm ${
-                          gameHud.winner === "player"
-                            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-                            : "border-rose-500/40 bg-rose-500/10 text-rose-200"
-                        }`}
-                      >
-                        {gameHud.winner === "player"
-                          ? "Match won. Timing and angle control worked."
-                          : "CPU won this match. Try faster forward swings and earlier timing."}
-                      </div>
-                    )}
-                  </>
-                )}
-
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-sm text-slate-300">
-                  {gameHud.status}
-                </div>
-              </div>
-            ) : (
-              <div className="mt-4 space-y-4 text-sm text-slate-200">
-                <p>
-                  Hold your phone like a Wii Remote. Swing forward to hit and rotate your wrist to direct the ball.
-                </p>
-
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                  <div className="flex items-center justify-between">
-                    <span>Sensor permission</span>
-                    <span className="text-xs text-slate-400">{permission}</span>
-                  </div>
-                  <button
-                    onClick={requestPermission}
-                    className="mt-3 w-full rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800"
-                  >
-                    Enable Motion Access
-                  </button>
-                  {!sensorAvailable && (
-                    <p className="mt-3 text-xs text-rose-300">
-                      This browser/device does not expose motion sensors.
-                    </p>
-                  )}
-                </div>
-
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                  <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Live telemetry</p>
-                  <p className="mt-2 text-sm text-slate-300">
-                    Roll {phoneTelemetry.roll.toFixed(2)} | Pitch {phoneTelemetry.pitch.toFixed(2)}
-                  </p>
-                  <p className="mt-1 text-sm text-slate-300">Swing {phoneTelemetry.swing.toFixed(2)}</p>
-                  <p className="mt-1 text-xs text-slate-400">Packets sent: {phoneTelemetry.packets}</p>
-                  <div className="mt-3 h-2 overflow-hidden rounded bg-slate-800">
-                    <div
-                      className="h-full bg-cyan-400 transition-all"
-                      style={{ width: `${clamp(phoneTelemetry.swing, 0, 1) * 100}%` }}
-                    />
-                  </div>
-                </div>
-
-                <p className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-xs text-slate-400">
-                  Use a backswing then a forward release. Wrist roll and lift shape cross-court, topspin, and slice.
-                </p>
-              </div>
-            )}
-          </section>
-
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/65 p-6">
-            <h2 className="text-lg font-semibold">3D Wii-Style Flow</h2>
-            <ol className="mt-3 list-decimal space-y-2 pl-4 text-sm text-slate-300">
-              <li>Run host on PC and scan the QR code with your phone.</li>
-              <li>Enable motion sensors on phone.</li>
-              <li>Use tennis-like backswing then release to trigger each shot.</li>
-              <li>Roll and lift your wrist through contact to shape direction and spin.</li>
-            </ol>
-            <p className="mt-4 text-xs text-slate-500">
-              POV camera is active during play.
-            </p>
-          </section>
+              )}
+            </>
+          )}
         </div>
       </div>
     </main>

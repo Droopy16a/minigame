@@ -67,6 +67,7 @@ type ControlState = {
   deviceQuat: THREE.Quaternion;
   neutralQuat: THREE.Quaternion;
   relativeQuat: THREE.Quaternion;
+  racketQuat: THREE.Quaternion;
   racketRoll: number;
   racketPitch: number;
   racketYaw: number;
@@ -218,6 +219,7 @@ function updateControlFromSample(control: ControlState, sample: MotionSample | n
     control.pitch = THREE.MathUtils.lerp(control.pitch, normalizedPitch, ORIENTATION_SMOOTHING);
     control.yaw = THREE.MathUtils.lerp(control.yaw, normalizedYaw, ORIENTATION_SMOOTHING);
 
+    control.racketQuat.copy(control.relativeQuat).normalize();
     control.racketRoll = clamp(control.unwrappedRoll, -2.1, 2.1);
     control.racketPitch = clamp(control.unwrappedPitch, -2.2, 2.2);
     control.racketYaw = clamp(control.unwrappedYaw, -2.4, 2.4);
@@ -270,6 +272,7 @@ export default function RacketTrackerPage() {
     deviceQuat: new THREE.Quaternion(),
     neutralQuat: new THREE.Quaternion(),
     relativeQuat: new THREE.Quaternion(),
+    racketQuat: new THREE.Quaternion(),
     racketRoll: 0,
     racketPitch: 0,
     racketYaw: 0,
@@ -325,7 +328,7 @@ export default function RacketTrackerPage() {
       }
     };
 
-    const interval = window.setInterval(poll, 40);
+    const interval = window.setInterval(poll, 16);
     poll();
 
     return () => {
@@ -521,7 +524,7 @@ export default function RacketTrackerPage() {
       } finally {
         sendingRef.current = false;
       }
-    }, 33);
+    }, 16);
 
     return () => {
       mounted = false;
@@ -636,13 +639,7 @@ export default function RacketTrackerPage() {
     const animate = () => {
       const control = controlRef.current;
 
-      const targetRotX = clamp(-control.racketPitch * 0.85, -1.3, 1.3);
-      const targetRotY = clamp(control.racketYaw * 0.9, -1.5, 1.5);
-      const targetRotZ = clamp(-control.racketRoll, -1.4, 1.4);
-
-      pivot.rotation.x = THREE.MathUtils.lerp(pivot.rotation.x, targetRotX, 0.22);
-      pivot.rotation.y = THREE.MathUtils.lerp(pivot.rotation.y, targetRotY, 0.22);
-      pivot.rotation.z = THREE.MathUtils.lerp(pivot.rotation.z, targetRotZ, 0.22);
+      pivot.quaternion.slerp(control.racketQuat, 0.2);
 
       pivot.position.x = THREE.MathUtils.lerp(pivot.position.x, control.roll * 0.62, 0.18);
       pivot.position.y = THREE.MathUtils.lerp(pivot.position.y, 1 + -control.pitch * 0.22, 0.18);
@@ -725,6 +722,7 @@ export default function RacketTrackerPage() {
     control.pitch = 0;
     control.yaw = 0;
     control.relativeQuat.identity();
+    control.racketQuat.identity();
     control.unwrappedRoll = 0;
     control.unwrappedPitch = 0;
     control.unwrappedYaw = 0;
